@@ -1,5 +1,10 @@
 const CACHE_NAME = "workout-tracker-v1";
-const APP_SHELL = ["/", "/manifest.webmanifest"];
+const APP_ROOT = self.registration.scope;
+const APP_SHELL = [
+  APP_ROOT,
+  new URL("manifest.webmanifest", APP_ROOT).href,
+  new URL("icon-192.png", APP_ROOT).href,
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -33,10 +38,10 @@ self.addEventListener("fetch", (event) => {
       fetch(event.request)
         .then((response) => {
           const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put("/", copy));
+          caches.open(CACHE_NAME).then((cache) => cache.put(APP_ROOT, copy));
           return response;
         })
-        .catch(() => caches.match("/")),
+        .catch(() => caches.match(APP_ROOT)),
     );
     return;
   }

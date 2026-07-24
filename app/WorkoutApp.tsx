@@ -164,8 +164,13 @@ export default function WorkoutApp() {
       "serviceWorker" in navigator &&
       !["localhost", "127.0.0.1"].includes(window.location.hostname)
     ) {
+      const appBase = new URL(".", window.location.href);
       const register = () =>
-        navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+        navigator.serviceWorker
+          .register(new URL("sw.js", appBase).pathname, {
+            scope: appBase.pathname,
+          })
+          .catch(() => undefined);
       window.addEventListener("load", register, { once: true });
       return () => window.removeEventListener("load", register);
     }
