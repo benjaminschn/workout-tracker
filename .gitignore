@@ -42,3 +42,6 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# This project deploys only to GitHub Pages.
+/.openai/hosting.json

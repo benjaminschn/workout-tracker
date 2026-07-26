@@ -20,8 +20,28 @@ npm install
 npm run dev
 ```
 
-The Cloudflare-compatible production build is created with `npm run build`.
-The static GitHub Pages build is created with `npm run build:pages`.
+Run the checks before publishing:
+
+```bash
+npm test
+npm run lint
+npm run build:pages
+```
+
+## Deployment
+
+**GitHub Pages is the only deployment target for this project.**
+
+- Push changes to `main` on `https://github.com/benjaminschn/workout-tracker`.
+- The `Deploy Workout Tracker to GitHub Pages` workflow publishes the site to
+  `https://benjaminschn.github.io/workout-tracker/`.
+- Confirm that workflow succeeds after every deployment.
+- Do not deploy this project with OpenAI Sites or another hosting provider.
+- Do not create or restore `.openai/hosting.json`; it is intentionally ignored.
+
+`npm run build` remains available as a Cloudflare-compatible build check, but it
+is not the deployment path. The static GitHub Pages build is created with
+`npm run build:pages`.
 
 Workout data never enters this repository or a hosted database. Each browser or
 installed PWA keeps its own records on the device.
