@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  ChangeEvent,
+  FocusEvent,
   FormEvent,
   useCallback,
   useEffect,
@@ -8,7 +10,12 @@ import {
   useRef,
   useState,
 } from "react";
-import { loadAppState, saveAppState } from "@/lib/repository";
+import {
+  ensurePersistentStorage,
+  loadAppState,
+  saveAppState,
+  StoragePersistenceStatus,
+} from "@/lib/repository";
 import {
   AppState,
   createId,
@@ -27,6 +34,7 @@ import {
   formatDuration,
   formatWeight,
   normalizeExerciseName,
+  parseAppStateBackup,
   recentExerciseHistory,
   startCustomWorkout,
   startTemplateWorkout,
@@ -80,6 +88,35 @@ function difficultyLabel(difficulty: Difficulty | null): string {
   return difficulty.charAt(0).toUpperCase() + difficulty.slice(1);
 }
 
+function selectNumericValue(event: FocusEvent<HTMLInputElement>) {
+  const input = event.currentTarget;
+  input.dataset.replaceOnNextInput = "true";
+  input.dataset.initialNumericValue = input.value;
+  window.requestAnimationFrame(() => {
+    if (document.activeElement === input) input.select();
+  });
+}
+
+function numericInputValue(event: ChangeEvent<HTMLInputElement>): string {
+  const input = event.currentTarget;
+  let value = input.value;
+  if (input.dataset.replaceOnNextInput === "true") {
+    const initialValue = input.dataset.initialNumericValue ?? "";
+    if (initialValue && value !== initialValue) {
+      const initialIndex = value.indexOf(initialValue);
+      if (initialIndex >= 0) {
+        value =
+          value.slice(0, initialIndex) +
+          value.slice(initialIndex + initialValue.length);
+        input.value = value;
+      }
+    }
+    delete input.dataset.replaceOnNextInput;
+    delete input.dataset.initialNumericValue;
+  }
+  return value;
+}
+
 export default function WorkoutApp() {
   const [state, setState] = useState<AppState>(cloneEmptyState);
   const [loaded, setLoaded] = useState(false);
@@ -97,6 +134,9 @@ export default function WorkoutApp() {
   );
   const [historyExerciseId, setHistoryExerciseId] = useState("");
   const [chartMetric, setChartMetric] = useState<ChartMetric>("weight");
+  const [storagePersistence, setStoragePersistence] =
+    useState<StoragePersistenceStatus | null>(null);
+  const [backupMessage, setBackupMessage] = useState("");
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousRestDeadline = useRef<number | null>(null);
 
@@ -121,6 +161,7 @@ export default function WorkoutApp() {
           setState(stored);
           setHistoryExerciseId(stored.exercises[0]?.id ?? "");
           setLoaded(true);
+          void ensurePersistentStorage().then(setStoragePersistence);
         }
       })
       .catch(() => {
@@ -128,6 +169,7 @@ export default function WorkoutApp() {
           setStorageError(
             "Your device storage could not be opened. Changes may not persist.",
           );
+          setStoragePersistence("best-effort");
           setLoaded(true);
         }
       });
@@ -605,6 +647,49 @@ export default function WorkoutApp() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  async function importJsonBackup(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+
+    setBackupMessage("");
+    let imported: AppState;
+    try {
+      imported = parseAppStateBackup(await file.text());
+    } catch (error) {
+      setStorageError(
+        error instanceof Error
+          ? error.message
+          : "We could not read that backup.",
+      );
+      return;
+    }
+
+    if (
+      !window.confirm(
+        "Replace all current workouts, templates, and settings with this backup?",
+      )
+    ) {
+      return;
+    }
+
+    try {
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      await saveAppState(imported);
+      setState(imported);
+      setHistoryExerciseId(imported.exercises[0]?.id ?? "");
+      setCompletedWorkoutId(null);
+      setEditingTemplateId(null);
+      setStorageError("");
+      setBackupMessage("Backup restored successfully.");
+    } catch {
+      setStorageError(
+        "We could not restore that backup. Your current data is unchanged.",
+      );
+    }
+  }
+
   if (!loaded) {
     return (
       <main className="loading-screen" aria-live="polite">
@@ -783,6 +868,9 @@ export default function WorkoutApp() {
                 exportCsv(state),
               )
             }
+            onImportJson={importJsonBackup}
+            storagePersistence={storagePersistence}
+            backupMessage={backupMessage}
           />
         )}
       </main>
@@ -890,7 +978,6 @@ function HomeView({
         </div>
         <div>
           <span className="eyebrow">Start a workout</span>
-          <h2>Make today count.</h2>
           <p>Build as you go, or follow a routine you already know.</p>
         </div>
         <div className="button-row">
@@ -1041,7 +1128,9 @@ function TemplatesView({
                         min="0"
                         inputMode="numeric"
                         value={set.targetReps}
-                        onChange={(event) =>
+                        onFocus={selectNumericValue}
+                        onChange={(event) => {
+                          const value = numericInputValue(event);
                           onUpdate(template.id, (current) => ({
                             ...current,
                             exercises: current.exercises.map((item) =>
@@ -1052,17 +1141,15 @@ function TemplatesView({
                                       itemSet.id === set.id
                                         ? {
                                             ...itemSet,
-                                            targetReps: Number(
-                                              event.target.value,
-                                            ),
+                                            targetReps: Number(value),
                                           }
                                         : itemSet,
                                     ),
                                   }
                                 : item,
                             ),
-                          }))
-                        }
+                          }));
+                        }}
                       />
                     </label>
                     <label>
@@ -1074,7 +1161,9 @@ function TemplatesView({
                         inputMode="decimal"
                         placeholder="—"
                         value={set.targetWeight ?? ""}
-                        onChange={(event) =>
+                        onFocus={selectNumericValue}
+                        onChange={(event) => {
+                          const value = numericInputValue(event);
                           onUpdate(template.id, (current) => ({
                             ...current,
                             exercises: current.exercises.map((item) =>
@@ -1086,17 +1175,17 @@ function TemplatesView({
                                         ? {
                                             ...itemSet,
                                             targetWeight:
-                                              event.target.value === ""
+                                              value === ""
                                                 ? null
-                                                : Number(event.target.value),
+                                                : Number(value),
                                           }
                                         : itemSet,
                                     ),
                                   }
                                 : item,
                             ),
-                          }))
-                        }
+                          }));
+                        }}
                       />
                     </label>
                     <button
@@ -1337,6 +1426,8 @@ function ActiveWorkoutView({
   const restRemaining = workout.restDeadline
     ? Math.max(0, Math.ceil((workout.restDeadline - now) / 1000))
     : 0;
+  const nextExercise =
+    workout.exercises[workout.currentExerciseIndex + 1] ?? null;
 
   return (
     <div className="workout-screen">
@@ -1467,13 +1558,15 @@ function ActiveWorkoutView({
                       min="0"
                       inputMode="numeric"
                       value={set.actualReps}
-                      onChange={(event) =>
+                      onFocus={selectNumericValue}
+                      onChange={(event) => {
+                        const value = numericInputValue(event);
                         onUpdateSet(
                           set.id,
                           "actualReps",
-                          Math.max(0, Number(event.target.value)),
-                        )
-                      }
+                          Math.max(0, Number(value)),
+                        );
+                      }}
                     />
                   </label>
                   <label>
@@ -1485,15 +1578,17 @@ function ActiveWorkoutView({
                       inputMode="decimal"
                       placeholder="—"
                       value={set.actualWeight ?? ""}
-                      onChange={(event) =>
+                      onFocus={selectNumericValue}
+                      onChange={(event) => {
+                        const value = numericInputValue(event);
                         onUpdateSet(
                           set.id,
                           "actualWeight",
-                          event.target.value === ""
+                          value === ""
                             ? null
-                            : Math.max(0, Number(event.target.value)),
-                        )
-                      }
+                            : Math.max(0, Number(value)),
+                        );
+                      }}
                     />
                   </label>
                   <button
@@ -1580,9 +1675,23 @@ function ActiveWorkoutView({
             {workout.exercises.filter((exercise) => exercise.completed).length}/
             {workout.exercises.length} complete
           </button>
-          <button className="primary-button" onClick={onFinish}>
-            Finish workout
-          </button>
+          {nextExercise ? (
+            <button
+              className="primary-button next-exercise-button"
+              onClick={() =>
+                onSelectExercise(workout.currentExerciseIndex + 1)
+              }
+              aria-label={`Go to next exercise: ${nextExercise.name}`}
+            >
+              <span>Next</span>
+              <strong>{nextExercise.name}</strong>
+              <span aria-hidden="true">→</span>
+            </button>
+          ) : (
+            <button className="primary-button" onClick={onFinish}>
+              Finish workout
+            </button>
+          )}
         </footer>
       )}
 
@@ -1896,12 +2005,19 @@ function SettingsView({
   onRestChange,
   onExportJson,
   onExportCsv,
+  onImportJson,
+  storagePersistence,
+  backupMessage,
 }: {
   state: AppState;
   onRestChange: (seconds: number) => void;
   onExportJson: () => void;
   onExportCsv: () => void;
+  onImportJson: (event: ChangeEvent<HTMLInputElement>) => void;
+  storagePersistence: StoragePersistenceStatus | null;
+  backupMessage: string;
 }) {
+  const importInput = useRef<HTMLInputElement>(null);
   const completed = state.workouts.filter(
     (workout) => workout.status === "completed",
   ).length;
@@ -1943,6 +2059,41 @@ function SettingsView({
       </section>
 
       <section className="section-card">
+        <div className="settings-row">
+          <div>
+            <span className="eyebrow">Local data protection</span>
+            <h2>
+              {storagePersistence === "persistent"
+                ? "Protected from automatic cleanup"
+                : storagePersistence === null
+                  ? "Checking storage protection…"
+                  : "Backup recommended"}
+            </h2>
+            <p>
+              {storagePersistence === "persistent"
+                ? "This device granted persistent storage. Manual deletion, uninstalling, or device loss can still remove your data."
+                : storagePersistence === "best-effort"
+                  ? "This device may remove local data when storage is low. Keep a JSON backup so your workouts can be restored."
+                  : storagePersistence === "unsupported"
+                    ? "This browser cannot confirm persistent storage. Keep a JSON backup so your workouts can be restored."
+                    : "The app is checking whether this device protects local workout data."}
+            </p>
+          </div>
+          <span
+            className={`storage-status ${storagePersistence ?? "checking"}`}
+          >
+            {storagePersistence === "persistent"
+              ? "Protected"
+              : storagePersistence === null
+                ? "Checking"
+                : storagePersistence === "unsupported"
+                  ? "Unavailable"
+                  : "Best effort"}
+          </span>
+        </div>
+      </section>
+
+      <section className="section-card">
         <div className="section-heading">
           <div>
             <span className="eyebrow">Your data</span>
@@ -1975,7 +2126,33 @@ function SettingsView({
             </span>
             <span aria-hidden="true">↓</span>
           </button>
+          <button
+            className="export-button"
+            onClick={() => importInput.current?.click()}
+          >
+            <span className="export-icon" aria-hidden="true">
+              ↑
+            </span>
+            <span>
+              <strong>Import JSON</strong>
+              <small>Restore a backup</small>
+            </span>
+            <span aria-hidden="true">›</span>
+          </button>
+          <input
+            ref={importInput}
+            className="sr-only"
+            type="file"
+            accept=".json,application/json"
+            onChange={onImportJson}
+            aria-label="Choose a Workout Tracker JSON backup"
+          />
         </div>
+        {backupMessage && (
+          <p className="backup-message" role="status">
+            {backupMessage}
+          </p>
+        )}
         <p className="privacy-note">
           <span aria-hidden="true">●</span> Private by design. Nothing is uploaded
           to an account or cloud database.

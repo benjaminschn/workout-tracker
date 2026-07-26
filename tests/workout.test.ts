@@ -5,9 +5,11 @@ import {
   elapsedWorkoutMs,
   exerciseHistory,
   exportCsv,
+  exportJson,
   formatDuration,
   migrateState,
   normalizeExerciseName,
+  parseAppStateBackup,
   recentExerciseHistory,
   WorkoutSession,
 } from "../lib/workout";
@@ -178,4 +180,62 @@ test("CSV escapes names and includes only completed sets", () => {
   const csv = exportCsv(state);
   assert.match(csv, /"Upper, ""A"""/);
   assert.equal(csv.split("\n").length, 2);
+});
+
+test("JSON backups round-trip through strict validation", () => {
+  const state = migrateState({
+    schemaVersion: 1,
+    exercises: [],
+    templates: [],
+    workouts: [workout()],
+    preferences: { defaultRestSeconds: 120, installHintDismissed: false },
+  });
+
+  assert.deepEqual(parseAppStateBackup(exportJson(state)), state);
+});
+
+test("JSON backup import applies preference migration defaults", () => {
+  const backup = JSON.stringify({
+    app: "Workout Tracker",
+    schemaVersion: 1,
+    exercises: [],
+    templates: [],
+    workouts: [],
+    preferences: { defaultRestSeconds: 60 },
+  });
+
+  assert.deepEqual(parseAppStateBackup(backup).preferences, {
+    defaultRestSeconds: 60,
+    installHintDismissed: false,
+  });
+});
+
+test("JSON backup import rejects malformed or unsupported files", () => {
+  assert.throws(() => parseAppStateBackup("{"), /valid JSON/);
+  assert.throws(
+    () =>
+      parseAppStateBackup(
+        JSON.stringify({
+          app: "Workout Tracker",
+          schemaVersion: 2,
+          exercises: [],
+          templates: [],
+          workouts: [],
+        }),
+      ),
+    /supported Workout Tracker backup/,
+  );
+  assert.throws(
+    () =>
+      parseAppStateBackup(
+        JSON.stringify({
+          app: "Workout Tracker",
+          schemaVersion: 1,
+          exercises: {},
+          templates: [],
+          workouts: [],
+        }),
+      ),
+    /incomplete or damaged/,
+  );
 });

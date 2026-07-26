@@ -403,6 +403,41 @@ export function exportJson(state: AppState): string {
   );
 }
 
+export function parseAppStateBackup(contents: string): AppState {
+  let value: unknown;
+  try {
+    value = JSON.parse(contents);
+  } catch {
+    throw new Error("This file is not valid JSON.");
+  }
+
+  if (!value || typeof value !== "object") {
+    throw new Error("This file is not a Workout Tracker backup.");
+  }
+
+  const candidate = value as Record<string, unknown>;
+  if (
+    candidate.app !== "Workout Tracker" ||
+    candidate.schemaVersion !== 1
+  ) {
+    throw new Error("This file is not a supported Workout Tracker backup.");
+  }
+
+  if (
+    !Array.isArray(candidate.exercises) ||
+    !Array.isArray(candidate.templates) ||
+    !Array.isArray(candidate.workouts) ||
+    (candidate.preferences !== undefined &&
+      (!candidate.preferences ||
+        typeof candidate.preferences !== "object" ||
+        Array.isArray(candidate.preferences)))
+  ) {
+    throw new Error("This backup is incomplete or damaged.");
+  }
+
+  return migrateState(candidate);
+}
+
 export function migrateState(value: unknown): AppState {
   if (!value || typeof value !== "object") return structuredClone(EMPTY_STATE);
   const candidate = value as Partial<AppState>;

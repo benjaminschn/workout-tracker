@@ -5,6 +5,40 @@ const DATABASE_VERSION = 1;
 const STORE_NAME = "app-state";
 const STATE_KEY = "current";
 
+export type StoragePersistenceStatus =
+  | "persistent"
+  | "best-effort"
+  | "unsupported";
+
+type PersistenceStorageManager = Pick<
+  StorageManager,
+  "persisted" | "persist"
+>;
+
+function browserStorageManager(): PersistenceStorageManager | undefined {
+  if (typeof navigator === "undefined" || !navigator.storage) return undefined;
+  return navigator.storage;
+}
+
+export async function ensurePersistentStorage(
+  storage: PersistenceStorageManager | undefined = browserStorageManager(),
+): Promise<StoragePersistenceStatus> {
+  if (
+    !storage ||
+    typeof storage.persisted !== "function" ||
+    typeof storage.persist !== "function"
+  ) {
+    return "unsupported";
+  }
+
+  try {
+    if (await storage.persisted()) return "persistent";
+    return (await storage.persist()) ? "persistent" : "best-effort";
+  } catch {
+    return "best-effort";
+  }
+}
+
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
