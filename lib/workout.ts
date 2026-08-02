@@ -77,6 +77,7 @@ export interface WorkoutSession {
 
 export interface Preferences {
   defaultRestSeconds: number;
+  restTimerSoundEnabled: boolean;
   installHintDismissed: boolean;
 }
 
@@ -123,6 +124,7 @@ export const EMPTY_STATE: AppState = {
   workouts: [],
   preferences: {
     defaultRestSeconds: 90,
+    restTimerSoundEnabled: true,
     installHintDismissed: false,
   },
 };

@@ -64,7 +64,11 @@ const state = (workouts: WorkoutSession[] = []): AppState => ({
   schemaVersion: 2,
   exercises: [],
   templates: [],
-  preferences: { defaultRestSeconds: 90, installHintDismissed: false },
+  preferences: {
+    defaultRestSeconds: 90,
+    restTimerSoundEnabled: true,
+    installHintDismissed: false,
+  },
   workouts,
 });
 
@@ -205,6 +209,19 @@ test("loading old local state starts fresh without migration", () => {
     }),
     state(),
   );
+});
+
+test("loading current state adds the rest timer sound preference", () => {
+  const currentWithoutSoundPreference = {
+    ...state(),
+    preferences: { defaultRestSeconds: 120, installHintDismissed: false },
+  };
+
+  assert.deepEqual(loadCurrentState(currentWithoutSoundPreference).preferences, {
+    defaultRestSeconds: 120,
+    restTimerSoundEnabled: true,
+    installHintDismissed: false,
+  });
 });
 
 test("backup import rejects malformed files", () => {

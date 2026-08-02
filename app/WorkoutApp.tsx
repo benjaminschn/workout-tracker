@@ -134,7 +134,8 @@ export default function WorkoutApp() {
     useState<StoragePersistenceStatus | null>(null);
   const [backupMessage, setBackupMessage] = useState("");
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const previousRestDeadline = useRef<number | null>(null);
+  const restAudioContext = useRef<AudioContext | null>(null);
+  const notifiedRestDeadline = useRef<number | null>(null);
 
   const activeWorkout = useMemo(
     () => state.workouts.find((workout) => workout.status === "active") ?? null,
@@ -214,43 +215,75 @@ export default function WorkoutApp() {
     }
   }, []);
 
+  const prepareRestAudio = useCallback((): AudioContext | null => {
+    try {
+      const AudioContextClass =
+        window.AudioContext ||
+        (
+          window as typeof window & {
+            webkitAudioContext?: typeof AudioContext;
+          }
+        ).webkitAudioContext;
+      if (!AudioContextClass) return null;
+      if (
+        !restAudioContext.current ||
+        restAudioContext.current.state === "closed"
+      ) {
+        restAudioContext.current = new AudioContextClass();
+      }
+      if (restAudioContext.current.state === "suspended") {
+        void restAudioContext.current.resume();
+      }
+      return restAudioContext.current;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const playRestNotification = useCallback(() => {
+    const audio = prepareRestAudio();
+    if (!audio) return;
+
+    const play = () => {
+      if (audio.state !== "running") return;
+      [0, 0.22].forEach((delay, index) => {
+        const oscillator = audio.createOscillator();
+        const gain = audio.createGain();
+        const start = audio.currentTime + delay;
+        oscillator.frequency.value = index === 0 ? 660 : 880;
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(0.08, start + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.18);
+        oscillator.connect(gain);
+        gain.connect(audio.destination);
+        oscillator.start(start);
+        oscillator.stop(start + 0.2);
+      });
+    };
+
+    if (audio.state === "suspended") {
+      void audio.resume().then(play).catch(() => undefined);
+    } else {
+      play();
+    }
+  }, [prepareRestAudio]);
+
   useEffect(() => {
     const deadline = activeWorkout?.restDeadline ?? null;
-    if (
-      previousRestDeadline.current &&
-      deadline &&
-      previousRestDeadline.current === deadline &&
-      deadline <= now
-    ) {
-      try {
-        const AudioContextClass =
-          window.AudioContext ||
-          (
-            window as typeof window & {
-              webkitAudioContext?: typeof AudioContext;
-            }
-          ).webkitAudioContext;
-        if (AudioContextClass) {
-          const audio = new AudioContextClass();
-          const oscillator = audio.createOscillator();
-          const gain = audio.createGain();
-          oscillator.frequency.value = 720;
-          gain.gain.setValueAtTime(0.05, audio.currentTime);
-          gain.gain.exponentialRampToValueAtTime(
-            0.001,
-            audio.currentTime + 0.35,
-          );
-          oscillator.connect(gain);
-          gain.connect(audio.destination);
-          oscillator.start();
-          oscillator.stop(audio.currentTime + 0.35);
-        }
-      } catch {
-        // The visual timer state remains the authoritative fallback.
-      }
+    if (!deadline) {
+      notifiedRestDeadline.current = null;
+      return;
     }
-    previousRestDeadline.current = deadline;
-  }, [activeWorkout?.restDeadline, now]);
+    if (deadline > now || notifiedRestDeadline.current === deadline) return;
+
+    notifiedRestDeadline.current = deadline;
+    if (state.preferences.restTimerSoundEnabled) playRestNotification();
+  }, [
+    activeWorkout?.restDeadline,
+    now,
+    playRestNotification,
+    state.preferences.restTimerSoundEnabled,
+  ]);
 
   const updateActiveWorkout = useCallback(
     (updater: (workout: WorkoutSession) => WorkoutSession) => {
@@ -376,6 +409,7 @@ export default function WorkoutApp() {
   }
 
   function toggleSet(setId: string) {
+    if (state.preferences.restTimerSoundEnabled) prepareRestAudio();
     const completedAt = Date.now();
     updateActiveWorkout((workout) => {
       const exercise = workout.exercises[workout.currentExerciseIndex];
@@ -414,6 +448,17 @@ export default function WorkoutApp() {
         ),
       };
     });
+  }
+
+  function toggleRestTimerSound() {
+    if (!state.preferences.restTimerSoundEnabled) prepareRestAudio();
+    setState((current) => ({
+      ...current,
+      preferences: {
+        ...current.preferences,
+        restTimerSoundEnabled: !current.preferences.restTimerSoundEnabled,
+      },
+    }));
   }
 
   function finishWorkout() {
@@ -729,6 +774,8 @@ export default function WorkoutApp() {
             restDeadline: deadline,
           }))
         }
+        restTimerSoundEnabled={state.preferences.restTimerSoundEnabled}
+        onToggleRestTimerSound={toggleRestTimerSound}
         onMoveExercise={(from, direction) =>
           updateActiveWorkout((workout) => {
             const to = from + direction;
@@ -1388,6 +1435,8 @@ function ActiveWorkoutView({
   onUpdateSet,
   onToggleSet,
   onRestChange,
+  restTimerSoundEnabled,
+  onToggleRestTimerSound,
   onMoveExercise,
   onRemoveExercise,
   onFinish,
@@ -1419,6 +1468,8 @@ function ActiveWorkoutView({
   ) => void;
   onToggleSet: (id: string) => void;
   onRestChange: (deadline: number | null) => void;
+  restTimerSoundEnabled: boolean;
+  onToggleRestTimerSound: () => void;
   onMoveExercise: (index: number, direction: -1 | 1) => void;
   onRemoveExercise: (index: number) => void;
   onFinish: () => void;
@@ -1546,6 +1597,16 @@ function ActiveWorkoutView({
                   />
                 </div>
                 <div className="rest-actions">
+                  <button
+                    className={restTimerSoundEnabled ? "sound-enabled" : ""}
+                    aria-pressed={restTimerSoundEnabled}
+                    onClick={onToggleRestTimerSound}
+                  >
+                    <span aria-hidden="true">
+                      {restTimerSoundEnabled ? "🔔" : "🔕"}
+                    </span>{" "}
+                    Sound {restTimerSoundEnabled ? "on" : "off"}
+                  </button>
                   <button
                     onClick={() =>
                       onRestChange((workout.restDeadline ?? now) + 30000)

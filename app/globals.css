@@ -1345,6 +1345,11 @@ p {
   font-weight: 750;
 }
 
+.rest-actions button.sound-enabled {
+  background: var(--blue);
+  color: white;
+}
+
 .sets-card,
 .progression-card {
   padding: 18px;
