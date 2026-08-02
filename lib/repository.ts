@@ -1,4 +1,4 @@
-import { AppState, EMPTY_STATE, migrateState } from "./workout";
+import { AppState, EMPTY_STATE, loadCurrentState } from "./workout";
 
 const DATABASE_NAME = "workout-tracker";
 const DATABASE_VERSION = 1;
@@ -62,7 +62,7 @@ export async function loadAppState(): Promise<AppState> {
     return await new Promise((resolve, reject) => {
       const transaction = database.transaction(STORE_NAME, "readonly");
       const request = transaction.objectStore(STORE_NAME).get(STATE_KEY);
-      request.onsuccess = () => resolve(migrateState(request.result));
+      request.onsuccess = () => resolve(loadCurrentState(request.result));
       request.onerror = () => reject(request.error);
     });
   } finally {

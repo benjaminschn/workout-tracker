@@ -1,5 +1,5 @@
-export type Difficulty = "easy" | "medium" | "hard" | "failed";
 export type WorkoutStatus = "active" | "completed" | "discarded";
+export type ProgressionKind = "increase" | "hold" | "reduce" | "insufficient";
 
 export interface Exercise {
   id: string;
@@ -8,18 +8,17 @@ export interface Exercise {
   createdAt: number;
 }
 
-export interface TemplateSet {
-  id: string;
-  targetReps: number;
-  targetWeight: number | null;
-}
-
 export interface TemplateExercise {
   id: string;
   exerciseId: string;
   name: string;
   restSeconds: number;
-  sets: TemplateSet[];
+  setCount: number;
+  repMin: number;
+  repMax: number;
+  targetRir: number;
+  targetWeight: number | null;
+  incrementKg: number;
 }
 
 export interface WorkoutTemplate {
@@ -32,12 +31,22 @@ export interface WorkoutTemplate {
 
 export interface WorkoutSet {
   id: string;
-  targetReps: number;
+  prescribedRepMin: number;
+  prescribedRepMax: number;
+  prescribedRir: number;
+  prescribedWeight: number | null;
   actualReps: number;
-  targetWeight: number | null;
   actualWeight: number | null;
+  actualRir: number | null;
   completed: boolean;
   completedAt: number | null;
+}
+
+export interface ProgressionRecommendation {
+  kind: ProgressionKind;
+  nextWeight: number | null;
+  title: string;
+  detail: string;
 }
 
 export interface WorkoutExercise {
@@ -45,8 +54,9 @@ export interface WorkoutExercise {
   exerciseId: string;
   name: string;
   restSeconds: number;
+  incrementKg: number;
   sets: WorkoutSet[];
-  difficulty: Difficulty | null;
+  progression: ProgressionRecommendation | null;
   completed: boolean;
   completedAt: number | null;
 }
@@ -71,7 +81,7 @@ export interface Preferences {
 }
 
 export interface AppState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   exercises: Exercise[];
   templates: WorkoutTemplate[];
   workouts: WorkoutSession[];
@@ -82,19 +92,14 @@ export interface ExerciseHistoryPoint {
   workoutId: string;
   date: number;
   workoutName: string;
-  difficulty: Difficulty | null;
   bestWeight: number;
+  estimatedOneRepMax: number;
   volume: number;
   totalReps: number;
+  averageRir: number | null;
   setSummary: string;
+  progression: ProgressionRecommendation | null;
 }
-
-export const DIFFICULTIES: Difficulty[] = [
-  "easy",
-  "medium",
-  "hard",
-  "failed",
-];
 
 export const SUGGESTED_EXERCISES = [
   "Back Squat",
@@ -112,7 +117,7 @@ export const SUGGESTED_EXERCISES = [
 ];
 
 export const EMPTY_STATE: AppState = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   exercises: [],
   templates: [],
   workouts: [],
@@ -138,27 +143,73 @@ export function displayExerciseName(name: string): string {
   return name.trim().replace(/\s+/g, " ");
 }
 
-export function createTemplateSet(
-  targetReps = 8,
-  targetWeight: number | null = null,
-): TemplateSet {
+export function createTemplateExercise(
+  exercise: Exercise,
+  restSeconds: number,
+): TemplateExercise {
   return {
-    id: createId("template-set"),
-    targetReps,
-    targetWeight,
+    id: createId("template-exercise"),
+    exerciseId: exercise.id,
+    name: exercise.name,
+    restSeconds,
+    setCount: 3,
+    repMin: 8,
+    repMax: 12,
+    targetRir: 2,
+    targetWeight: null,
+    incrementKg: 2.5,
   };
 }
 
 export function createWorkoutSet(
-  targetReps = 8,
-  targetWeight: number | null = null,
+  repMin = 8,
+  repMax = 12,
+  prescribedRir = 2,
+  prescribedWeight: number | null = null,
 ): WorkoutSet {
   return {
     id: createId("set"),
-    targetReps,
-    actualReps: targetReps,
-    targetWeight,
-    actualWeight: targetWeight,
+    prescribedRepMin: repMin,
+    prescribedRepMax: repMax,
+    prescribedRir,
+    prescribedWeight,
+    actualReps: repMin,
+    actualWeight: prescribedWeight,
+    actualRir: null,
+    completed: false,
+    completedAt: null,
+  };
+}
+
+function templateExerciseToWorkoutExercise(
+  exercise: Pick<
+    TemplateExercise,
+    | "exerciseId"
+    | "name"
+    | "restSeconds"
+    | "setCount"
+    | "repMin"
+    | "repMax"
+    | "targetRir"
+    | "targetWeight"
+    | "incrementKg"
+  >,
+): WorkoutExercise {
+  return {
+    id: createId("workout-exercise"),
+    exerciseId: exercise.exerciseId,
+    name: exercise.name,
+    restSeconds: exercise.restSeconds,
+    incrementKg: exercise.incrementKg,
+    sets: Array.from({ length: exercise.setCount }, () =>
+      createWorkoutSet(
+        exercise.repMin,
+        exercise.repMax,
+        exercise.targetRir,
+        exercise.targetWeight,
+      ),
+    ),
+    progression: null,
     completed: false,
     completedAt: null,
   };
@@ -167,20 +218,10 @@ export function createWorkoutSet(
 export function createWorkoutExercise(
   exercise: Exercise,
   restSeconds: number,
-  sets: TemplateSet[] = [createTemplateSet()],
 ): WorkoutExercise {
-  return {
-    id: createId("workout-exercise"),
-    exerciseId: exercise.id,
-    name: exercise.name,
-    restSeconds,
-    sets: sets.map((set) =>
-      createWorkoutSet(set.targetReps, set.targetWeight),
-    ),
-    difficulty: null,
-    completed: false,
-    completedAt: null,
-  };
+  return templateExerciseToWorkoutExercise(
+    createTemplateExercise(exercise, restSeconds),
+  );
 }
 
 export function startCustomWorkout(now = Date.now()): WorkoutSession {
@@ -214,50 +255,36 @@ export function startTemplateWorkout(
     pausedTotalMs: 0,
     restDeadline: null,
     currentExerciseIndex: 0,
-    exercises: template.exercises.map((exercise) => ({
-      id: createId("workout-exercise"),
-      exerciseId: exercise.exerciseId,
-      name: exercise.name,
-      restSeconds: exercise.restSeconds,
-      sets: exercise.sets.map((set) =>
-        createWorkoutSet(set.targetReps, set.targetWeight),
-      ),
-      difficulty: null,
-      completed: false,
-      completedAt: null,
-    })),
+    exercises: template.exercises.map(templateExerciseToWorkoutExercise),
   };
 }
 
 export function workoutToTemplate(
   workout: WorkoutSession,
-  existing?: WorkoutTemplate,
   now = Date.now(),
 ): WorkoutTemplate {
   return {
-    id: existing?.id ?? createId("template"),
+    id: createId("template"),
     name: workout.name === "Custom workout" ? "My workout" : workout.name,
-    createdAt: existing?.createdAt ?? now,
+    createdAt: now,
     updatedAt: now,
-    exercises: workout.exercises.map((exercise) => ({
-      id:
-        existing?.exercises.find(
-          (candidate) => candidate.exerciseId === exercise.exerciseId,
-        )?.id ?? createId("template-exercise"),
-      exerciseId: exercise.exerciseId,
-      name: exercise.name,
-      restSeconds: exercise.restSeconds,
-      sets: exercise.sets.map((set, index) => ({
-        id:
-          existing?.exercises
-            .find(
-              (candidate) => candidate.exerciseId === exercise.exerciseId,
-            )
-            ?.sets.at(index)?.id ?? createId("template-set"),
-        targetReps: set.actualReps,
-        targetWeight: set.actualWeight,
-      })),
-    })),
+    exercises: workout.exercises.map((exercise) => {
+      const first = exercise.sets[0];
+      const firstCompleted = exercise.sets.find((set) => set.completed);
+      return {
+        id: createId("template-exercise"),
+        exerciseId: exercise.exerciseId,
+        name: exercise.name,
+        restSeconds: exercise.restSeconds,
+        setCount: Math.max(1, exercise.sets.length),
+        repMin: first?.prescribedRepMin ?? 8,
+        repMax: first?.prescribedRepMax ?? 12,
+        targetRir: first?.prescribedRir ?? 2,
+        targetWeight:
+          exercise.progression?.nextWeight ?? firstCompleted?.actualWeight ?? null,
+        incrementKg: exercise.incrementKg,
+      };
+    }),
   };
 }
 
@@ -286,17 +313,174 @@ export function formatWeight(value: number | null): string {
   return `${Number.isInteger(value) ? value : value.toFixed(1)} kg`;
 }
 
+export function formatRir(value: number | null): string {
+  return value === null ? "RIR ?" : `RIR ${value >= 5 ? "5+" : value}`;
+}
+
 export function formatSetSummary(sets: WorkoutSet[]): string {
   const completed = sets.filter((set) => set.completed);
   if (completed.length === 0) return "No completed sets";
   const groups = new Map<string, number>();
   for (const set of completed) {
-    const key = `${set.actualReps} @ ${formatWeight(set.actualWeight)}`;
+    const key = `${set.actualReps} @ ${formatWeight(set.actualWeight)} · ${formatRir(set.actualRir)}`;
     groups.set(key, (groups.get(key) ?? 0) + 1);
   }
   return Array.from(groups.entries())
     .map(([key, count]) => `${count}×${key}`)
     .join(" · ");
+}
+
+function completedSets(exercise: WorkoutExercise): WorkoutSet[] {
+  return exercise.sets.filter((set) => set.completed);
+}
+
+function commonWorkingWeight(sets: WorkoutSet[]): number | null | undefined {
+  const weights = new Set(sets.map((set) => set.actualWeight));
+  return weights.size === 1 ? sets[0]?.actualWeight : undefined;
+}
+
+function isHardMiss(exercise: WorkoutExercise): boolean {
+  const hardMisses = completedSets(exercise).filter(
+    (set) =>
+      set.actualReps < set.prescribedRepMin &&
+      set.actualRir !== null &&
+      set.actualRir <= Math.max(0, set.prescribedRir - 1),
+  );
+  return hardMisses.length >= Math.min(2, exercise.sets.length);
+}
+
+export function progressionRecommendation(
+  exercise: WorkoutExercise,
+  previousExercise?: WorkoutExercise,
+): ProgressionRecommendation {
+  const sets = completedSets(exercise);
+  const fallbackWeight = sets[0]?.actualWeight ?? null;
+
+  if (sets.length === 0) {
+    return {
+      kind: "insufficient",
+      nextWeight: null,
+      title: "No recommendation yet",
+      detail: "Complete at least one work set first.",
+    };
+  }
+
+  if (sets.length !== exercise.sets.length) {
+    return {
+      kind: "insufficient",
+      nextWeight: fallbackWeight,
+      title: "Keep the working weight",
+      detail: "Complete all planned sets for a progression recommendation.",
+    };
+  }
+
+  if (sets.some((set) => set.actualRir === null)) {
+    return {
+      kind: "insufficient",
+      nextWeight: fallbackWeight,
+      title: "Keep the working weight",
+      detail: "Log RIR for every set so effort can be compared.",
+    };
+  }
+
+  const workingWeight = commonWorkingWeight(sets);
+  if (workingWeight === undefined) {
+    return {
+      kind: "insufficient",
+      nextWeight: fallbackWeight,
+      title: "Keep the working weight",
+      detail: "Use one working weight across the sets for double progression.",
+    };
+  }
+
+  const allAtTop = sets.every(
+    (set) =>
+      set.actualReps >= set.prescribedRepMax &&
+      (set.actualRir ?? -1) >= set.prescribedRir,
+  );
+  if (allAtTop) {
+    if (workingWeight === null || workingWeight === 0) {
+      return {
+        kind: "hold",
+        nextWeight: workingWeight,
+        title: "Range completed",
+        detail: "Add external load or choose a harder variation next time.",
+      };
+    }
+    const nextWeight = workingWeight + exercise.incrementKg;
+    return {
+      kind: "increase",
+      nextWeight,
+      title: `Increase to ${formatWeight(nextWeight)}`,
+      detail: "Every set reached the top of the range at the target RIR.",
+    };
+  }
+
+  if (
+    isHardMiss(exercise) &&
+    previousExercise &&
+    isHardMiss(previousExercise) &&
+    workingWeight !== null &&
+    workingWeight > 0
+  ) {
+    const nextWeight = Math.max(0, workingWeight - exercise.incrementKg);
+    return {
+      kind: "reduce",
+      nextWeight,
+      title: `Reduce to ${formatWeight(nextWeight)}`,
+      detail: "The minimum reps were missed at high effort twice in a row.",
+    };
+  }
+
+  if (isHardMiss(exercise)) {
+    return {
+      kind: "hold",
+      nextWeight: workingWeight,
+      title: "Repeat this weight once",
+      detail: "The range was missed at high effort; one session can be a bad day.",
+    };
+  }
+
+  const reachedTopTooHard = sets.every(
+    (set) => set.actualReps >= set.prescribedRepMax,
+  );
+  return {
+    kind: "hold",
+    nextWeight: workingWeight,
+    title: `Keep ${formatWeight(workingWeight)}`,
+    detail: reachedTopTooHard
+      ? "The top of the range was reached, but below the target RIR."
+      : "Stay in the range and build reps while keeping the target RIR.",
+  };
+}
+
+export function previousCompletedExercise(
+  state: AppState,
+  exerciseId: string,
+  before: number = Number.POSITIVE_INFINITY,
+): WorkoutExercise | undefined {
+  return state.workouts
+    .filter(
+      (workout) =>
+        workout.status === "completed" &&
+        (workout.endedAt ?? workout.startedAt) < before,
+    )
+    .sort(
+      (a, b) =>
+        (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt),
+    )
+    .flatMap((workout) => workout.exercises)
+    .find(
+      (exercise) =>
+        exercise.exerciseId === exerciseId &&
+        exercise.sets.some((set) => set.completed),
+    );
+}
+
+export function estimatedOneRepMax(set: WorkoutSet): number {
+  if (!set.completed || !set.actualWeight) return 0;
+  const repsToFailure = set.actualReps + (set.actualRir ?? 0);
+  return set.actualWeight * (1 + repsToFailure / 30);
 }
 
 export function exerciseHistory(
@@ -307,28 +491,38 @@ export function exerciseHistory(
     .filter((workout) => workout.status === "completed")
     .flatMap((workout) =>
       workout.exercises
-        .filter((exercise) => exercise.exerciseId === exerciseId)
+        .filter(
+          (exercise) =>
+            exercise.exerciseId === exerciseId &&
+            exercise.sets.some((set) => set.completed),
+        )
         .map((exercise) => {
-          const completedSets = exercise.sets.filter((set) => set.completed);
+          const sets = completedSets(exercise);
+          const rirValues = sets.flatMap((set) =>
+            set.actualRir === null ? [] : [set.actualRir],
+          );
           return {
             workoutId: workout.id,
             date: workout.endedAt ?? workout.startedAt,
             workoutName: workout.name,
-            difficulty: exercise.difficulty,
-            bestWeight: completedSets.reduce(
+            bestWeight: sets.reduce(
               (best, set) => Math.max(best, set.actualWeight ?? 0),
               0,
             ),
-            volume: completedSets.reduce(
-              (total, set) =>
-                total + set.actualReps * (set.actualWeight ?? 0),
+            estimatedOneRepMax: sets.reduce(
+              (best, set) => Math.max(best, estimatedOneRepMax(set)),
               0,
             ),
-            totalReps: completedSets.reduce(
-              (total, set) => total + set.actualReps,
+            volume: sets.reduce(
+              (total, set) => total + set.actualReps * (set.actualWeight ?? 0),
               0,
             ),
-            setSummary: formatSetSummary(completedSets),
+            totalReps: sets.reduce((total, set) => total + set.actualReps, 0),
+            averageRir: rirValues.length
+              ? rirValues.reduce((sum, rir) => sum + rir, 0) / rirValues.length
+              : null,
+            setSummary: formatSetSummary(sets),
+            progression: exercise.progression,
           };
         }),
     )
@@ -358,11 +552,15 @@ export function exportCsv(state: AppState): string {
       "exercise_id",
       "exercise",
       "set",
-      "target_reps",
+      "rep_range_min",
+      "rep_range_max",
+      "target_rir",
       "completed_reps",
       "target_weight_kg",
       "completed_weight_kg",
-      "difficulty",
+      "completed_rir",
+      "progression",
+      "next_weight_kg",
     ],
   ];
   for (const workout of state.workouts.filter(
@@ -379,11 +577,15 @@ export function exportCsv(state: AppState): string {
           exercise.exerciseId,
           exercise.name,
           index + 1,
-          set.targetReps,
+          set.prescribedRepMin,
+          set.prescribedRepMax,
+          set.prescribedRir,
           set.actualReps,
-          set.targetWeight ?? "",
+          set.prescribedWeight ?? "",
           set.actualWeight ?? "",
-          exercise.difficulty ?? "",
+          set.actualRir ?? "",
+          exercise.progression?.kind ?? "",
+          exercise.progression?.nextWeight ?? "",
         ]);
       });
     }
@@ -416,10 +618,7 @@ export function parseAppStateBackup(contents: string): AppState {
   }
 
   const candidate = value as Record<string, unknown>;
-  if (
-    candidate.app !== "Workout Tracker" ||
-    candidate.schemaVersion !== 1
-  ) {
+  if (candidate.app !== "Workout Tracker" || candidate.schemaVersion !== 2) {
     throw new Error("This file is not a supported Workout Tracker backup.");
   }
 
@@ -435,15 +634,15 @@ export function parseAppStateBackup(contents: string): AppState {
     throw new Error("This backup is incomplete or damaged.");
   }
 
-  return migrateState(candidate);
+  return loadCurrentState(candidate);
 }
 
-export function migrateState(value: unknown): AppState {
+export function loadCurrentState(value: unknown): AppState {
   if (!value || typeof value !== "object") return structuredClone(EMPTY_STATE);
   const candidate = value as Partial<AppState>;
-  if (candidate.schemaVersion !== 1) return structuredClone(EMPTY_STATE);
+  if (candidate.schemaVersion !== 2) return structuredClone(EMPTY_STATE);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     exercises: Array.isArray(candidate.exercises) ? candidate.exercises : [],
     templates: Array.isArray(candidate.templates) ? candidate.templates : [],
     workouts: Array.isArray(candidate.workouts) ? candidate.workouts : [],

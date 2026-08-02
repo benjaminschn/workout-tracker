@@ -19,11 +19,9 @@ import {
 import {
   AppState,
   createId,
-  createTemplateSet,
+  createTemplateExercise,
   createWorkoutExercise,
   createWorkoutSet,
-  DIFFICULTIES,
-  Difficulty,
   displayExerciseName,
   EMPTY_STATE,
   elapsedWorkoutMs,
@@ -35,10 +33,13 @@ import {
   formatWeight,
   normalizeExerciseName,
   parseAppStateBackup,
+  previousCompletedExercise,
+  progressionRecommendation,
   recentExerciseHistory,
   startCustomWorkout,
   startTemplateWorkout,
   SUGGESTED_EXERCISES,
+  TemplateExercise,
   WorkoutExercise,
   WorkoutSession,
   WorkoutTemplate,
@@ -46,7 +47,7 @@ import {
 } from "@/lib/workout";
 
 type Tab = "home" | "templates" | "history" | "settings";
-type ChartMetric = "weight" | "volume";
+type ChartMetric = "e1rm" | "volume";
 
 const tabItems: { id: Tab; label: string; icon: string }[] = [
   { id: "home", label: "Home", icon: "●" },
@@ -81,11 +82,6 @@ function countCompletedSets(workout: WorkoutSession): number {
       total + exercise.sets.filter((set) => set.completed).length,
     0,
   );
-}
-
-function difficultyLabel(difficulty: Difficulty | null): string {
-  if (!difficulty) return "Not rated";
-  return difficulty.charAt(0).toUpperCase() + difficulty.slice(1);
 }
 
 function selectNumericValue(event: FocusEvent<HTMLInputElement>) {
@@ -133,7 +129,7 @@ export default function WorkoutApp() {
     null,
   );
   const [historyExerciseId, setHistoryExerciseId] = useState("");
-  const [chartMetric, setChartMetric] = useState<ChartMetric>("weight");
+  const [chartMetric, setChartMetric] = useState<ChartMetric>("e1rm");
   const [storagePersistence, setStoragePersistence] =
     useState<StoragePersistenceStatus | null>(null);
   const [backupMessage, setBackupMessage] = useState("");
@@ -257,31 +253,15 @@ export default function WorkoutApp() {
   }, [activeWorkout?.restDeadline, now]);
 
   const updateActiveWorkout = useCallback(
-    (
-      updater: (workout: WorkoutSession) => WorkoutSession,
-      syncTemplate = false,
-    ) => {
+    (updater: (workout: WorkoutSession) => WorkoutSession) => {
       setState((current) => {
         const active = current.workouts.find(
           (workout) => workout.status === "active",
         );
         if (!active) return current;
         const updated = updater(active);
-        let templates = current.templates;
-        if (syncTemplate && updated.sourceTemplateId) {
-          const existing = templates.find(
-            (template) => template.id === updated.sourceTemplateId,
-          );
-          if (existing) {
-            const synced = workoutToTemplate(updated, existing);
-            templates = templates.map((template) =>
-              template.id === synced.id ? synced : template,
-            );
-          }
-        }
         return {
           ...current,
-          templates,
           workouts: current.workouts.map((workout) =>
             workout.id === updated.id ? updated : workout,
           ),
@@ -349,25 +329,11 @@ export default function WorkoutApp() {
         };
         return updated;
       });
-      const active = workouts.find((workout) => workout.status === "active");
-      let templates = current.templates;
-      if (active?.sourceTemplateId) {
-        const existing = templates.find(
-          (template) => template.id === active.sourceTemplateId,
-        );
-        if (existing) {
-          const synced = workoutToTemplate(active, existing);
-          templates = templates.map((template) =>
-            template.id === synced.id ? synced : template,
-          );
-        }
-      }
       return {
         ...current,
         exercises: current.exercises.some((item) => item.id === known.id)
           ? current.exercises
           : [...current.exercises, known],
-        templates,
         workouts,
       };
     });
@@ -385,26 +351,24 @@ export default function WorkoutApp() {
       exercises: workout.exercises.map((exercise, index) =>
         index === workout.currentExerciseIndex ? updater(exercise) : exercise,
       ),
-    }), true);
+    }));
   }
 
   function updateSet(
     setId: string,
-    field: "actualReps" | "actualWeight",
+    field: "actualReps" | "actualWeight" | "actualRir",
     value: number | null,
   ) {
     updateCurrentExercise((exercise) => ({
       ...exercise,
       completed: false,
-      difficulty: null,
+      progression: null,
       completedAt: null,
       sets: exercise.sets.map((set) =>
         set.id === setId
           ? {
               ...set,
               [field]: value,
-              ...(field === "actualReps" ? { targetReps: value ?? 0 } : {}),
-              ...(field === "actualWeight" ? { targetWeight: value } : {}),
             }
           : set,
       ),
@@ -424,12 +388,10 @@ export default function WorkoutApp() {
           ? completedAt + exercise.restSeconds * 1000
           : workout.restDeadline,
         exercises: workout.exercises.map((item, index) =>
-          index === workout.currentExerciseIndex
+              index === workout.currentExerciseIndex
             ? {
                 ...item,
-                completed: false,
-                difficulty: null,
-                completedAt: null,
+                progression: null,
                 sets: item.sets.map((set) =>
                   set.id === setId
                     ? {
@@ -439,37 +401,14 @@ export default function WorkoutApp() {
                       }
                     : set,
                 ),
-              }
-            : item,
-        ),
-      };
-    }, true);
-  }
-
-  function rateExercise(difficulty: Difficulty) {
-    if (!activeWorkout) return;
-    const exercise =
-      activeWorkout.exercises[activeWorkout.currentExerciseIndex];
-    if (!exercise || !exercise.sets.some((set) => set.completed)) return;
-    const completedAt = Date.now();
-    updateActiveWorkout((workout) => {
-      const nextIncomplete = workout.exercises.findIndex(
-        (item, index) =>
-          index > workout.currentExerciseIndex && !item.completed,
-      );
-      return {
-        ...workout,
-        currentExerciseIndex:
-          nextIncomplete >= 0
-            ? nextIncomplete
-            : workout.currentExerciseIndex,
-        exercises: workout.exercises.map((item, index) =>
-          index === workout.currentExerciseIndex
-            ? {
-                ...item,
-                difficulty,
-                completed: true,
-                completedAt,
+                completed: item.sets.every((set) =>
+                  set.id === setId ? !set.completed : set.completed,
+                ),
+                completedAt: item.sets.every((set) =>
+                  set.id === setId ? !set.completed : set.completed,
+                )
+                  ? completedAt
+                  : null,
               }
             : item,
         ),
@@ -479,33 +418,61 @@ export default function WorkoutApp() {
 
   function finishWorkout() {
     if (!activeWorkout) return;
-    const unrated = activeWorkout.exercises.find(
-      (exercise) =>
-        exercise.sets.some((set) => set.completed) && !exercise.difficulty,
-    );
-    if (unrated) {
-      window.alert(`Rate ${unrated.name} before finishing your workout.`);
-      return;
-    }
     if (countCompletedSets(activeWorkout) === 0) {
       window.alert("Complete at least one set before finishing.");
       return;
     }
     const endedAt = Date.now();
-    setState((current) => ({
-      ...current,
-      workouts: current.workouts.map((workout) =>
-        workout.id === activeWorkout.id
-          ? {
-              ...workout,
-              status: "completed",
-              endedAt,
-              pausedAt: null,
-              restDeadline: null,
-            }
-          : workout,
-      ),
-    }));
+    setState((current) => {
+      const storedActive = current.workouts.find(
+        (workout) => workout.id === activeWorkout.id,
+      );
+      if (!storedActive) return current;
+      const exercises = storedActive.exercises.map((exercise) => ({
+        ...exercise,
+        completed: exercise.sets.some((set) => set.completed),
+        completedAt: exercise.sets.some((set) => set.completed) ? endedAt : null,
+        progression: progressionRecommendation(
+          exercise,
+          previousCompletedExercise(current, exercise.exerciseId, endedAt),
+        ),
+      }));
+      const completed: WorkoutSession = {
+        ...storedActive,
+        status: "completed",
+        endedAt,
+        pausedAt: null,
+        restDeadline: null,
+        exercises,
+      };
+      return {
+        ...current,
+        templates: current.templates.map((template) =>
+          template.id !== completed.sourceTemplateId
+            ? template
+            : {
+                ...template,
+                updatedAt: endedAt,
+                exercises: template.exercises.map((templateExercise) => {
+                  const result = exercises.find(
+                    (exercise) =>
+                      exercise.exerciseId === templateExercise.exerciseId,
+                  );
+                  return result?.progression?.nextWeight !== undefined &&
+                    result.progression.nextWeight !== null
+                    ? {
+                        ...templateExercise,
+                        targetWeight: result.progression.nextWeight,
+                      }
+                    : templateExercise;
+                }),
+              },
+        ),
+        workouts: current.workouts.map((workout) =>
+          workout.id === completed.id ? completed : workout,
+        ),
+      };
+    });
     setCompletedWorkoutId(activeWorkout.id);
     setOverviewOpen(false);
   }
@@ -598,13 +565,10 @@ export default function WorkoutApp() {
               updatedAt: Date.now(),
               exercises: [
                 ...template.exercises,
-                {
-                  id: createId("template-exercise"),
-                  exerciseId: exercise.id,
-                  name: exercise.name,
-                  restSeconds: current.preferences.defaultRestSeconds,
-                  sets: [createTemplateSet()],
-                },
+                createTemplateExercise(
+                  exercise,
+                  current.preferences.defaultRestSeconds,
+                ),
               ],
             }
           : template,
@@ -624,6 +588,23 @@ export default function WorkoutApp() {
       ),
     }));
     setEditingTemplateId(null);
+  }
+
+  function deleteWorkout(workoutId: string) {
+    const workout = state.workouts.find((item) => item.id === workoutId);
+    if (!workout || workout.status === "active") return;
+    if (
+      !window.confirm(
+        `Delete “${workout.name}”? This removes the complete workout from every exercise history.`,
+      )
+    ) {
+      return;
+    }
+    setState((current) => ({
+      ...current,
+      workouts: current.workouts.filter((item) => item.id !== workoutId),
+    }));
+    if (completedWorkoutId === workoutId) setCompletedWorkoutId(null);
   }
 
   function downloadFile(filename: string, type: string, contents: string) {
@@ -725,7 +706,7 @@ export default function WorkoutApp() {
           setOverviewOpen(false);
         }}
         onRenameWorkout={(name) =>
-          updateActiveWorkout((workout) => ({ ...workout, name }), true)
+          updateActiveWorkout((workout) => ({ ...workout, name }))
         }
         onPause={() =>
           updateActiveWorkout((workout) =>
@@ -742,7 +723,6 @@ export default function WorkoutApp() {
         onUpdateExercise={updateCurrentExercise}
         onUpdateSet={updateSet}
         onToggleSet={toggleSet}
-        onRateExercise={rateExercise}
         onRestChange={(deadline) =>
           updateActiveWorkout((workout) => ({
             ...workout,
@@ -768,7 +748,7 @@ export default function WorkoutApp() {
                     ? from
                     : workout.currentExerciseIndex,
             };
-          }, true)
+          })
         }
         onRemoveExercise={(index) =>
           updateActiveWorkout((workout) => {
@@ -781,7 +761,7 @@ export default function WorkoutApp() {
                 Math.min(workout.currentExerciseIndex, exercises.length - 1),
               ),
             };
-          }, true)
+          })
         }
         onFinish={finishWorkout}
         onDiscard={discardWorkout}
@@ -840,6 +820,7 @@ export default function WorkoutApp() {
             chartMetric={chartMetric}
             onExerciseChange={setHistoryExerciseId}
             onChartMetricChange={setChartMetric}
+            onDeleteWorkout={deleteWorkout}
           />
         )}
         {activeTab === "settings" && (
@@ -922,6 +903,16 @@ export default function WorkoutApp() {
                 </strong>
                 <span>Exercises</span>
               </div>
+            </div>
+            <div className="completion-progressions">
+              {completedWorkout.exercises
+                .filter((exercise) => exercise.progression)
+                .map((exercise) => (
+                  <div key={exercise.id}>
+                    <span>{exercise.name}</span>
+                    <strong>{exercise.progression?.title}</strong>
+                  </div>
+                ))}
             </div>
             {!completedWorkout.sourceTemplateId && (
               <button className="primary-button" onClick={saveCompletedAsTemplate}>
@@ -1076,6 +1067,19 @@ function TemplatesView({
   const template = state.templates.find((item) => item.id === editingId);
   const [exerciseName, setExerciseName] = useState("");
 
+  function updateExerciseFields(
+    templateId: string,
+    exerciseId: string,
+    fields: Partial<TemplateExercise>,
+  ) {
+    onUpdate(templateId, (current) => ({
+      ...current,
+      exercises: current.exercises.map((exercise) =>
+        exercise.id === exerciseId ? { ...exercise, ...fields } : exercise,
+      ),
+    }));
+  }
+
   if (template) {
     return (
       <div className="page-stack">
@@ -1118,118 +1122,121 @@ function TemplatesView({
                     ×
                   </button>
                 </div>
-                {exercise.sets.map((set, setIndex) => (
-                  <div className="compact-set-row" key={set.id}>
-                    <span>Set {setIndex + 1}</span>
-                    <label>
-                      <span>Reps</span>
-                      <input
-                        type="number"
-                        min="0"
-                        inputMode="numeric"
-                        value={set.targetReps}
-                        onFocus={selectNumericValue}
-                        onChange={(event) => {
-                          const value = numericInputValue(event);
-                          onUpdate(template.id, (current) => ({
-                            ...current,
-                            exercises: current.exercises.map((item) =>
-                              item.id === exercise.id
-                                ? {
-                                    ...item,
-                                    sets: item.sets.map((itemSet) =>
-                                      itemSet.id === set.id
-                                        ? {
-                                            ...itemSet,
-                                            targetReps: Number(value),
-                                          }
-                                        : itemSet,
-                                    ),
-                                  }
-                                : item,
-                            ),
-                          }));
-                        }}
-                      />
-                    </label>
-                    <label>
-                      <span>kg</span>
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.5"
-                        inputMode="decimal"
-                        placeholder="—"
-                        value={set.targetWeight ?? ""}
-                        onFocus={selectNumericValue}
-                        onChange={(event) => {
-                          const value = numericInputValue(event);
-                          onUpdate(template.id, (current) => ({
-                            ...current,
-                            exercises: current.exercises.map((item) =>
-                              item.id === exercise.id
-                                ? {
-                                    ...item,
-                                    sets: item.sets.map((itemSet) =>
-                                      itemSet.id === set.id
-                                        ? {
-                                            ...itemSet,
-                                            targetWeight:
-                                              value === ""
-                                                ? null
-                                                : Number(value),
-                                          }
-                                        : itemSet,
-                                    ),
-                                  }
-                                : item,
-                            ),
-                          }));
-                        }}
-                      />
-                    </label>
-                    <button
-                      className="mini-button"
-                      aria-label={`Remove set ${setIndex + 1}`}
-                      onClick={() =>
-                        onUpdate(template.id, (current) => ({
-                          ...current,
-                          exercises: current.exercises.map((item) =>
-                            item.id === exercise.id
-                              ? {
-                                  ...item,
-                                  sets: item.sets.filter(
-                                    (itemSet) => itemSet.id !== set.id,
-                                  ),
-                                }
-                              : item,
+                <div className="prescription-grid">
+                  <label>
+                    <span>Sets</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="10"
+                      inputMode="numeric"
+                      value={exercise.setCount}
+                      onFocus={selectNumericValue}
+                      onChange={(event) =>
+                        updateExerciseFields(template.id, exercise.id, {
+                          setCount: Math.max(
+                            1,
+                            Math.min(10, Number(numericInputValue(event))),
                           ),
-                        }))
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>Reps from</span>
+                    <input
+                      type="number"
+                      min="1"
+                      inputMode="numeric"
+                      value={exercise.repMin}
+                      onFocus={selectNumericValue}
+                      onChange={(event) => {
+                        const repMin = Math.max(
+                          1,
+                          Number(numericInputValue(event)),
+                        );
+                        updateExerciseFields(template.id, exercise.id, {
+                          repMin,
+                          repMax: Math.max(repMin, exercise.repMax),
+                        });
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>Reps to</span>
+                    <input
+                      type="number"
+                      min={exercise.repMin}
+                      inputMode="numeric"
+                      value={exercise.repMax}
+                      onFocus={selectNumericValue}
+                      onChange={(event) =>
+                        updateExerciseFields(template.id, exercise.id, {
+                          repMax: Math.max(
+                            exercise.repMin,
+                            Number(numericInputValue(event)),
+                          ),
+                        })
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>Target RIR</span>
+                    <select
+                      value={exercise.targetRir}
+                      onChange={(event) =>
+                        updateExerciseFields(template.id, exercise.id, {
+                          targetRir: Number(event.target.value),
+                        })
                       }
                     >
-                      ×
-                    </button>
-                  </div>
-                ))}
+                      {[0, 1, 2, 3, 4, 5].map((rir) => (
+                        <option value={rir} key={rir}>
+                          {rir === 5 ? "5+" : rir}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Working kg</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      inputMode="decimal"
+                      placeholder="Bodyweight"
+                      value={exercise.targetWeight ?? ""}
+                      onFocus={selectNumericValue}
+                      onChange={(event) => {
+                        const value = numericInputValue(event);
+                        updateExerciseFields(template.id, exercise.id, {
+                          targetWeight: value === "" ? null : Number(value),
+                        });
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>Increase kg</span>
+                    <input
+                      type="number"
+                      min="0.5"
+                      step="0.5"
+                      inputMode="decimal"
+                      value={exercise.incrementKg}
+                      onFocus={selectNumericValue}
+                      onChange={(event) =>
+                        updateExerciseFields(template.id, exercise.id, {
+                          incrementKg: Math.max(
+                            0.5,
+                            Number(numericInputValue(event)),
+                          ),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
                 <div className="editor-actions">
-                  <button
-                    className="text-button"
-                    onClick={() =>
-                      onUpdate(template.id, (current) => ({
-                        ...current,
-                        exercises: current.exercises.map((item) =>
-                          item.id === exercise.id
-                            ? {
-                                ...item,
-                                sets: [...item.sets, createTemplateSet()],
-                              }
-                            : item,
-                        ),
-                      }))
-                    }
-                  >
-                    + Add set
-                  </button>
+                  <span className="progression-mode">Double progression</span>
                   <label className="rest-field">
                     Rest
                     <select
@@ -1380,7 +1387,6 @@ function ActiveWorkoutView({
   onUpdateExercise,
   onUpdateSet,
   onToggleSet,
-  onRateExercise,
   onRestChange,
   onMoveExercise,
   onRemoveExercise,
@@ -1408,11 +1414,10 @@ function ActiveWorkoutView({
   ) => void;
   onUpdateSet: (
     setId: string,
-    field: "actualReps" | "actualWeight",
+    field: "actualReps" | "actualWeight" | "actualRir",
     value: number | null,
   ) => void;
   onToggleSet: (id: string) => void;
-  onRateExercise: (difficulty: Difficulty) => void;
   onRestChange: (deadline: number | null) => void;
   onMoveExercise: (index: number, direction: -1 | 1) => void;
   onRemoveExercise: (index: number) => void;
@@ -1423,6 +1428,12 @@ function ActiveWorkoutView({
   const history = current
     ? recentExerciseHistory(state, current.exerciseId)
     : [];
+  const previousExercise = current
+    ? previousCompletedExercise(state, current.exerciseId, workout.startedAt)
+    : undefined;
+  const recommendation = current
+    ? progressionRecommendation(current, previousExercise)
+    : null;
   const restRemaining = workout.restDeadline
     ? Math.max(0, Math.ceil((workout.restDeadline - now) / 1000))
     : 0;
@@ -1481,11 +1492,18 @@ function ActiveWorkoutView({
                   {current.sets.filter((set) => set.completed).length} of{" "}
                   {current.sets.length} sets complete
                 </p>
+                {current.sets[0] && (
+                  <p className="prescription-summary">
+                    {current.sets.length} × {current.sets[0].prescribedRepMin}–
+                    {current.sets[0].prescribedRepMax} @ RIR {current.sets[0].prescribedRir}
+                    {" · "}{formatWeight(current.sets[0].prescribedWeight)}
+                  </p>
+                )}
               </div>
               <span
                 className={`status-pill ${current.completed ? "complete" : ""}`}
               >
-                {current.completed ? "Rated" : "In progress"}
+                {current.completed ? "Complete" : "In progress"}
               </span>
             </section>
 
@@ -1500,8 +1518,10 @@ function ActiveWorkoutView({
                     <div key={item.workoutId}>
                       <span>{dateLabel(item.date)}</span>
                       <strong>{item.setSummary}</strong>
-                      <small className={`difficulty ${item.difficulty ?? ""}`}>
-                        {difficultyLabel(item.difficulty)}
+                      <small className="rir-average">
+                        {item.averageRir === null
+                          ? "RIR not logged"
+                          : `Ø RIR ${item.averageRir.toFixed(1)}`}
                       </small>
                     </div>
                   ))}
@@ -1541,8 +1561,9 @@ function ActiveWorkoutView({
             <section className="sets-card">
               <div className="sets-header">
                 <span>Set</span>
-                <span>Reps</span>
                 <span>kg</span>
+                <span>Reps</span>
+                <span>RIR</span>
                 <span>Done</span>
               </div>
               {current.sets.map((set, index) => (
@@ -1551,6 +1572,26 @@ function ActiveWorkoutView({
                   key={set.id}
                 >
                   <span className="set-number">{index + 1}</span>
+                  <label>
+                    <span className="sr-only">Weight for set {index + 1}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.5"
+                      inputMode="decimal"
+                      placeholder="—"
+                      value={set.actualWeight ?? ""}
+                      onFocus={selectNumericValue}
+                      onChange={(event) => {
+                        const value = numericInputValue(event);
+                        onUpdateSet(
+                          set.id,
+                          "actualWeight",
+                          value === "" ? null : Math.max(0, Number(value)),
+                        );
+                      }}
+                    />
+                  </label>
                   <label>
                     <span className="sr-only">Reps for set {index + 1}</span>
                     <input
@@ -1570,26 +1611,27 @@ function ActiveWorkoutView({
                     />
                   </label>
                   <label>
-                    <span className="sr-only">Weight for set {index + 1}</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.5"
-                      inputMode="decimal"
-                      placeholder="—"
-                      value={set.actualWeight ?? ""}
-                      onFocus={selectNumericValue}
-                      onChange={(event) => {
-                        const value = numericInputValue(event);
+                    <span className="sr-only">RIR for set {index + 1}</span>
+                    <select
+                      className="rir-select"
+                      value={set.actualRir ?? ""}
+                      onChange={(event) =>
                         onUpdateSet(
                           set.id,
-                          "actualWeight",
-                          value === ""
+                          "actualRir",
+                          event.target.value === ""
                             ? null
-                            : Math.max(0, Number(value)),
-                        );
-                      }}
-                    />
+                            : Number(event.target.value),
+                        )
+                      }
+                    >
+                      <option value="">?</option>
+                      {[0, 1, 2, 3, 4, 5].map((rir) => (
+                        <option value={rir} key={rir}>
+                          {rir === 5 ? "5+" : rir}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <button
                     className="set-check"
@@ -1609,9 +1651,17 @@ function ActiveWorkoutView({
                   onClick={() =>
                     onUpdateExercise((exercise) => ({
                       ...exercise,
-                      sets: [...exercise.sets, createWorkoutSet()],
+                      sets: [
+                        ...exercise.sets,
+                        createWorkoutSet(
+                          exercise.sets[0]?.prescribedRepMin,
+                          exercise.sets[0]?.prescribedRepMax,
+                          exercise.sets[0]?.prescribedRir,
+                          exercise.sets[0]?.prescribedWeight,
+                        ),
+                      ],
                       completed: false,
-                      difficulty: null,
+                      progression: null,
                     }))
                   }
                 >
@@ -1638,32 +1688,18 @@ function ActiveWorkoutView({
               </div>
             </section>
 
-            <section className="rating-card">
+            <section className={`progression-card ${recommendation?.kind ?? ""}`}>
               <div>
-                <span className="eyebrow">Complete exercise</span>
-                <h2>How did it feel?</h2>
-                <p>Complete at least one set, then choose a rating.</p>
+                <span className="eyebrow">Double progression</span>
+                <h2>{recommendation?.title}</h2>
+                <p>{recommendation?.detail}</p>
               </div>
-              <div className="rating-grid">
-                {DIFFICULTIES.map((difficulty) => (
-                  <button
-                    key={difficulty}
-                    className={`${difficulty} ${
-                      current.difficulty === difficulty ? "selected" : ""
-                    }`}
-                    disabled={!current.sets.some((set) => set.completed)}
-                    onClick={() => onRateExercise(difficulty)}
-                  >
-                    <span aria-hidden="true">
-                      {difficulty === "easy" && "○"}
-                      {difficulty === "medium" && "◐"}
-                      {difficulty === "hard" && "●"}
-                      {difficulty === "failed" && "×"}
-                    </span>
-                    {difficultyLabel(difficulty)}
-                  </button>
-                ))}
-              </div>
+              <span className="progression-icon" aria-hidden="true">
+                {recommendation?.kind === "increase" && "↑"}
+                {recommendation?.kind === "reduce" && "↓"}
+                {recommendation?.kind === "hold" && "→"}
+                {recommendation?.kind === "insufficient" && "·"}
+              </span>
             </section>
           </>
         )}
@@ -1741,9 +1777,6 @@ function ActiveWorkoutView({
                       <small>
                         {exercise.sets.filter((set) => set.completed).length}/
                         {exercise.sets.length} sets
-                        {exercise.difficulty
-                          ? ` · ${difficultyLabel(exercise.difficulty)}`
-                          : ""}
                       </small>
                     </span>
                   </button>
@@ -1845,19 +1878,21 @@ function HistoryView({
   chartMetric,
   onExerciseChange,
   onChartMetricChange,
+  onDeleteWorkout,
 }: {
   state: AppState;
   exerciseId: string;
   chartMetric: ChartMetric;
   onExerciseChange: (id: string) => void;
   onChartMetricChange: (metric: ChartMetric) => void;
+  onDeleteWorkout: (workoutId: string) => void;
 }) {
   const history = exerciseId ? exerciseHistory(state, exerciseId) : [];
   const exercise = state.exercises.find((item) => item.id === exerciseId);
   const maximum = Math.max(
     1,
     ...history.map((item) =>
-      chartMetric === "weight" ? item.bestWeight : item.volume,
+      chartMetric === "e1rm" ? item.estimatedOneRepMax : item.volume,
     ),
   );
 
@@ -1891,10 +1926,10 @@ function HistoryView({
         </label>
         <div className="segmented-control" aria-label="Chart metric">
           <button
-            className={chartMetric === "weight" ? "active" : ""}
-            onClick={() => onChartMetricChange("weight")}
+            className={chartMetric === "e1rm" ? "active" : ""}
+            onClick={() => onChartMetricChange("e1rm")}
           >
-            Best weight
+            Est. strength
           </button>
           <button
             className={chartMetric === "volume" ? "active" : ""}
@@ -1911,14 +1946,14 @@ function HistoryView({
             <div className="section-heading">
               <div>
                 <span className="eyebrow">
-                  {chartMetric === "weight" ? "Best working weight" : "Total volume"}
+                  {chartMetric === "e1rm" ? "Estimated one-rep max" : "Total volume"}
                 </span>
                 <h2>{exercise?.name}</h2>
               </div>
               <div className="chart-latest">
                 <strong>
-                  {chartMetric === "weight"
-                    ? formatWeight(history.at(-1)?.bestWeight ?? 0)
+                  {chartMetric === "e1rm"
+                    ? formatWeight(history.at(-1)?.estimatedOneRepMax ?? 0)
                     : `${Math.round(history.at(-1)?.volume ?? 0)} kg`}
                 </strong>
                 <span>latest</span>
@@ -1927,7 +1962,7 @@ function HistoryView({
             <div className="bar-chart" aria-label={`${exercise?.name} chart`}>
               {history.slice(-8).map((item) => {
                 const value =
-                  chartMetric === "weight" ? item.bestWeight : item.volume;
+                  chartMetric === "e1rm" ? item.estimatedOneRepMax : item.volume;
                 return (
                   <div className="bar-column" key={item.workoutId}>
                     <span className="bar-value">
@@ -1945,7 +1980,7 @@ function HistoryView({
                 );
               })}
             </div>
-            {history.every((item) => item.bestWeight === 0) && (
+            {history.every((item) => item.estimatedOneRepMax === 0) && (
               <p className="chart-note">
                 No weight recorded yet. Bar labels show completed reps.
               </p>
@@ -1961,7 +1996,11 @@ function HistoryView({
             </div>
             <div className="session-list">
               {[...history].reverse().map((item) => (
-                <HistoryRow item={item} key={item.workoutId} />
+                <HistoryRow
+                  item={item}
+                  key={item.workoutId}
+                  onDelete={() => onDeleteWorkout(item.workoutId)}
+                />
               ))}
             </div>
           </section>
@@ -1976,7 +2015,13 @@ function HistoryView({
   );
 }
 
-function HistoryRow({ item }: { item: ExerciseHistoryPoint }) {
+function HistoryRow({
+  item,
+  onDelete,
+}: {
+  item: ExerciseHistoryPoint;
+  onDelete: () => void;
+}) {
   return (
     <article className="session-row">
       <div className="session-date">
@@ -1993,9 +2038,23 @@ function HistoryRow({ item }: { item: ExerciseHistoryPoint }) {
           {item.workoutName} · {longDateLabel(item.date)}
         </span>
       </div>
-      <span className={`difficulty-badge ${item.difficulty ?? ""}`}>
-        {difficultyLabel(item.difficulty)}
-      </span>
+      <div className="session-actions">
+        {item.progression && (
+          <span className={`progression-badge ${item.progression.kind}`}>
+            {item.progression.kind === "increase" && "Increase"}
+            {item.progression.kind === "hold" && "Hold"}
+            {item.progression.kind === "reduce" && "Reduce"}
+            {item.progression.kind === "insufficient" && "No decision"}
+          </span>
+        )}
+        <button
+          className="icon-button danger-text delete-workout-button"
+          onClick={onDelete}
+          aria-label={`Delete ${item.workoutName} from ${longDateLabel(item.date)}`}
+        >
+          ×
+        </button>
+      </div>
     </article>
   );
 }

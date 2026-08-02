@@ -6,9 +6,10 @@ iPhone Home Screen.
 ## Features
 
 - Custom and template-guided workouts
-- Sets, reps, kilogram weights, and rest timers
-- Easy, medium, hard, and failed exercise ratings
-- Previous-two-session hints and exercise progress charts
+- Rep ranges, per-set RIR, kilogram weights, and rest timers
+- RIR-aware double progression with transparent next-weight recommendations
+- Previous-two-session hints and estimated-strength progress charts
+- Individually deletable templates and recorded workouts
 - Private on-device IndexedDB storage
 - JSON and CSV exports
 - Installable PWA with offline app-shell caching

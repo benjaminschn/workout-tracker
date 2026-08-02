@@ -664,6 +664,40 @@ p {
   text-align: center;
 }
 
+.prescription-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.prescription-grid label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.prescription-grid input,
+.prescription-grid select {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 8px;
+  background: var(--surface);
+  font-weight: 700;
+  text-align: center;
+}
+
+.progression-mode {
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 0.68rem;
+  font-weight: 750;
+}
+
 .mini-button {
   width: 32px;
   height: 42px;
@@ -815,6 +849,43 @@ p {
   gap: 12px;
   padding: 14px 0;
   border-top: 1px solid var(--line);
+}
+
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.progression-badge,
+.rir-average {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 750;
+}
+
+.progression-badge.increase {
+  background: rgba(38, 155, 99, 0.12);
+  color: var(--green);
+}
+
+.progression-badge.reduce {
+  background: rgba(217, 74, 84, 0.12);
+  color: var(--red);
+}
+
+.delete-workout-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  font-size: 1.1rem;
 }
 
 .session-date {
@@ -1148,6 +1219,13 @@ p {
   margin-bottom: 8px;
 }
 
+.exercise-hero .prescription-summary {
+  margin-top: 8px;
+  color: var(--blue);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
 .status-pill {
   flex: 0 0 auto;
   padding: 8px 11px;
@@ -1268,7 +1346,7 @@ p {
 }
 
 .sets-card,
-.rating-card {
+.progression-card {
   padding: 18px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
@@ -1278,7 +1356,7 @@ p {
 .sets-header,
 .set-row {
   display: grid;
-  grid-template-columns: 42px 1fr 1fr 54px;
+  grid-template-columns: 38px 1fr 1fr 64px 50px;
   align-items: center;
   gap: 9px;
 }
@@ -1311,7 +1389,8 @@ p {
   text-align: center;
 }
 
-.set-row input {
+.set-row input,
+.set-row select {
   width: 100%;
   min-height: 48px;
   padding: 0 6px;
@@ -1319,6 +1398,10 @@ p {
   background: var(--surface);
   font-weight: 750;
   text-align: center;
+}
+
+.set-row select {
+  appearance: none;
 }
 
 .set-check {
@@ -1347,67 +1430,48 @@ p {
   padding: 11px 5px 0;
 }
 
-.rating-card {
+.progression-card {
   display: grid;
-  gap: 18px;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 16px;
 }
 
-.rating-card h2 {
-  margin-bottom: 5px;
+.progression-card h2 {
+  margin-bottom: 6px;
 }
 
-.rating-card p {
+.progression-card p {
   font-size: 0.78rem;
 }
 
-.rating-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
+.progression-card.increase {
+  border-color: color-mix(in srgb, var(--green) 45%, var(--line));
 }
 
-.rating-grid button {
+.progression-card.reduce {
+  border-color: color-mix(in srgb, var(--red) 45%, var(--line));
+}
+
+.progression-icon {
   display: grid;
-  min-height: 78px;
+  width: 48px;
+  height: 48px;
   place-items: center;
-  gap: 4px;
-  border: 1px solid var(--line);
   border-radius: 15px;
-  background: var(--surface-muted);
-  color: var(--muted);
-  font-size: 0.68rem;
-  font-weight: 750;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 1.3rem;
+  font-weight: 850;
 }
 
-.rating-grid button span {
-  font-size: 1.25rem;
-}
-
-.rating-grid button.selected.easy,
-.rating-grid button.easy:hover {
-  border-color: var(--green);
-  background: rgba(38, 155, 99, 0.1);
+.progression-card.increase .progression-icon {
+  background: rgba(38, 155, 99, 0.12);
   color: var(--green);
 }
 
-.rating-grid button.selected.medium,
-.rating-grid button.medium:hover {
-  border-color: var(--amber);
-  background: rgba(196, 122, 18, 0.1);
-  color: var(--amber);
-}
-
-.rating-grid button.selected.hard,
-.rating-grid button.hard:hover {
-  border-color: var(--orange);
-  background: rgba(223, 91, 54, 0.1);
-  color: var(--orange);
-}
-
-.rating-grid button.selected.failed,
-.rating-grid button.failed:hover {
-  border-color: var(--red);
-  background: rgba(217, 74, 84, 0.1);
+.progression-card.reduce .progression-icon {
+  background: rgba(217, 74, 84, 0.12);
   color: var(--red);
 }
 
@@ -1651,6 +1715,37 @@ p {
   font-size: 0.65rem;
 }
 
+.completion-progressions {
+  display: grid;
+  width: 100%;
+  gap: 7px;
+  text-align: left;
+}
+
+.completion-progressions div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 13px;
+  border-radius: 12px;
+  background: var(--surface-muted);
+}
+
+.completion-progressions span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.completion-progressions strong {
+  flex: 0 0 auto;
+  color: var(--blue);
+  font-size: 0.76rem;
+}
+
 .add-modal form {
   display: grid;
   gap: 12px;
@@ -1747,9 +1842,9 @@ p {
     grid-template-columns: 40px minmax(0, 1fr);
   }
 
-  .difficulty-badge {
+  .session-actions {
     grid-column: 2;
-    width: fit-content;
+    justify-content: space-between;
   }
 
   .export-grid {
@@ -1783,12 +1878,8 @@ p {
 
   .sets-header,
   .set-row {
-    grid-template-columns: 34px 1fr 1fr 48px;
-    gap: 5px;
-  }
-
-  .rating-grid {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 28px 1fr 1fr 56px 44px;
+    gap: 4px;
   }
 
   .overview-button {
@@ -1802,6 +1893,10 @@ p {
   .compact-set-row {
     grid-template-columns: 44px 1fr 1fr 28px;
     gap: 5px;
+  }
+
+  .prescription-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .add-exercise-form {
