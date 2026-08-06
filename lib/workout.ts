@@ -315,8 +315,27 @@ export function formatWeight(value: number | null): string {
   return `${Number.isInteger(value) ? value : value.toFixed(1)} kg`;
 }
 
+/** Allowed RIR values. `3` is the open-ended bucket displayed as "2+". */
+export const RIR_OPTIONS = [0, 1, 2, 3] as const;
+export const RIR_PLUS_VALUE = 3;
+
+export function formatRirLabel(value: number): string {
+  return value >= RIR_PLUS_VALUE ? "2+" : String(value);
+}
+
 export function formatRir(value: number | null): string {
-  return value === null ? "RIR ?" : `RIR ${value >= 5 ? "5+" : value}`;
+  return value === null ? "RIR ?" : `RIR ${formatRirLabel(value)}`;
+}
+
+/** Clamp RIR to 0, 1, 2, or 2+ (stored as 3). Legacy 3/4/5 become 2+. */
+export function normalizeRir(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return 0;
+  if (value >= RIR_PLUS_VALUE) return RIR_PLUS_VALUE;
+  return Math.trunc(value);
+}
+
+export function normalizeNullableRir(value: number | null): number | null {
+  return value === null ? null : normalizeRir(value);
 }
 
 export function formatSetSummary(sets: WorkoutSet[]): string {
@@ -639,6 +658,48 @@ export function parseAppStateBackup(contents: string): AppState {
   return loadCurrentState(candidate);
 }
 
+function normalizeTemplateExercise(exercise: TemplateExercise): TemplateExercise {
+  return {
+    ...exercise,
+    targetRir: normalizeRir(exercise.targetRir),
+  };
+}
+
+function normalizeWorkoutSet(set: WorkoutSet): WorkoutSet {
+  return {
+    ...set,
+    prescribedRir: normalizeRir(set.prescribedRir),
+    actualRir: normalizeNullableRir(set.actualRir),
+  };
+}
+
+function normalizeWorkoutExercise(exercise: WorkoutExercise): WorkoutExercise {
+  return {
+    ...exercise,
+    sets: Array.isArray(exercise.sets)
+      ? exercise.sets.map(normalizeWorkoutSet)
+      : [],
+  };
+}
+
+function normalizeWorkout(workout: WorkoutSession): WorkoutSession {
+  return {
+    ...workout,
+    exercises: Array.isArray(workout.exercises)
+      ? workout.exercises.map(normalizeWorkoutExercise)
+      : [],
+  };
+}
+
+function normalizeTemplate(template: WorkoutTemplate): WorkoutTemplate {
+  return {
+    ...template,
+    exercises: Array.isArray(template.exercises)
+      ? template.exercises.map(normalizeTemplateExercise)
+      : [],
+  };
+}
+
 export function loadCurrentState(value: unknown): AppState {
   if (!value || typeof value !== "object") return structuredClone(EMPTY_STATE);
   const candidate = value as Partial<AppState>;
@@ -646,8 +707,12 @@ export function loadCurrentState(value: unknown): AppState {
   return {
     schemaVersion: 2,
     exercises: Array.isArray(candidate.exercises) ? candidate.exercises : [],
-    templates: Array.isArray(candidate.templates) ? candidate.templates : [],
-    workouts: Array.isArray(candidate.workouts) ? candidate.workouts : [],
+    templates: Array.isArray(candidate.templates)
+      ? candidate.templates.map(normalizeTemplate)
+      : [],
+    workouts: Array.isArray(candidate.workouts)
+      ? candidate.workouts.map(normalizeWorkout)
+      : [],
     preferences: {
       ...EMPTY_STATE.preferences,
       ...(candidate.preferences ?? {}),

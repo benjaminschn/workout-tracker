@@ -30,8 +30,10 @@ import {
   exportCsv,
   exportJson,
   formatDuration,
+  formatRirLabel,
   formatWeight,
   normalizeExerciseName,
+  RIR_OPTIONS,
   parseAppStateBackup,
   previousCompletedExercise,
   progressionRecommendation,
@@ -1237,9 +1239,9 @@ function TemplatesView({
                         })
                       }
                     >
-                      {[0, 1, 2, 3, 4, 5].map((rir) => (
+                      {RIR_OPTIONS.map((rir) => (
                         <option value={rir} key={rir}>
-                          {rir === 5 ? "5+" : rir}
+                          {formatRirLabel(rir)}
                         </option>
                       ))}
                     </select>
@@ -1546,7 +1548,8 @@ function ActiveWorkoutView({
                 {current.sets[0] && (
                   <p className="prescription-summary">
                     {current.sets.length} × {current.sets[0].prescribedRepMin}–
-                    {current.sets[0].prescribedRepMax} @ RIR {current.sets[0].prescribedRir}
+                    {current.sets[0].prescribedRepMax} @ RIR{" "}
+                    {formatRirLabel(current.sets[0].prescribedRir)}
                     {" · "}{formatWeight(current.sets[0].prescribedWeight)}
                   </p>
                 )}
@@ -1687,9 +1690,9 @@ function ActiveWorkoutView({
                       }
                     >
                       <option value="">?</option>
-                      {[0, 1, 2, 3, 4, 5].map((rir) => (
+                      {RIR_OPTIONS.map((rir) => (
                         <option value={rir} key={rir}>
-                          {rir === 5 ? "5+" : rir}
+                          {formatRirLabel(rir)}
                         </option>
                       ))}
                     </select>

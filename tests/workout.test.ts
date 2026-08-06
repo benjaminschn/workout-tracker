@@ -7,8 +7,11 @@ import {
   exportCsv,
   exportJson,
   formatDuration,
+  formatRir,
+  formatRirLabel,
   loadCurrentState,
   normalizeExerciseName,
+  normalizeRir,
   parseAppStateBackup,
   progressionRecommendation,
   WorkoutExercise,
@@ -105,11 +108,24 @@ test("history ignores non-completed workouts and returns RIR-aware metrics", () 
   assert.match(result.setSummary, /RIR 2/);
 });
 
+test("RIR labels use 0, 1, 2, and 2+", () => {
+  assert.equal(formatRirLabel(0), "0");
+  assert.equal(formatRirLabel(1), "1");
+  assert.equal(formatRirLabel(2), "2");
+  assert.equal(formatRirLabel(3), "2+");
+  assert.equal(formatRir(3), "RIR 2+");
+  assert.equal(formatRir(null), "RIR ?");
+  assert.equal(normalizeRir(5), 3);
+  assert.equal(normalizeRir(4), 3);
+  assert.equal(normalizeRir(2.9), 2);
+  assert.equal(normalizeRir(-1), 0);
+});
+
 test("double progression increases only after every set reaches the top at target RIR", () => {
   const result = progressionRecommendation(
     exercise({
       sets: [
-        set({ id: "a", actualReps: 12, actualRir: 3 }),
+        set({ id: "a", actualReps: 12, actualRir: 3 }), // 2+
         set({ id: "b", actualReps: 12, actualRir: 2 }),
         set({ id: "c", actualReps: 12, actualRir: 2 }),
       ],
@@ -222,6 +238,51 @@ test("loading current state adds the rest timer sound preference", () => {
     restTimerSoundEnabled: true,
     installHintDismissed: false,
   });
+});
+
+test("loading current state clamps legacy RIR values to 0–2+", () => {
+  const loaded = loadCurrentState({
+    ...state([
+      workout({
+        exercises: [
+          exercise({
+            sets: [
+              set({
+                prescribedRir: 5,
+                actualRir: 4,
+              }),
+            ],
+          }),
+        ],
+      }),
+    ]),
+    templates: [
+      {
+        id: "template-1",
+        name: "A",
+        createdAt: 1,
+        updatedAt: 1,
+        exercises: [
+          {
+            id: "te-1",
+            exerciseId: "squat",
+            name: "Back Squat",
+            restSeconds: 90,
+            setCount: 3,
+            repMin: 8,
+            repMax: 12,
+            targetRir: 5,
+            targetWeight: 50,
+            incrementKg: 2.5,
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(loaded.templates[0]?.exercises[0]?.targetRir, 3);
+  assert.equal(loaded.workouts[0]?.exercises[0]?.sets[0]?.prescribedRir, 3);
+  assert.equal(loaded.workouts[0]?.exercises[0]?.sets[0]?.actualRir, 3);
 });
 
 test("backup import rejects malformed files", () => {
