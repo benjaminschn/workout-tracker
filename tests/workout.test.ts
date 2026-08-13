@@ -7,13 +7,19 @@ import {
   exportCsv,
   exportJson,
   formatDuration,
+  formatLoggedRirLabel,
   formatRir,
   formatRirLabel,
+  formatRirMeaning,
+  formatRirSetInstruction,
   loadCurrentState,
   normalizeExerciseName,
   normalizeRir,
   parseAppStateBackup,
   progressionRecommendation,
+  RIR_OPTIONS,
+  TARGET_RIR_OPTIONS,
+  workoutToTemplate,
   WorkoutExercise,
   WorkoutSession,
   WorkoutSet,
@@ -68,8 +74,9 @@ const state = (workouts: WorkoutSession[] = []): AppState => ({
   exercises: [],
   templates: [],
   preferences: {
-    defaultRestSeconds: 90,
+    defaultRestSeconds: 120,
     restTimerSoundEnabled: true,
+    preventScreenLock: true,
     installHintDismissed: false,
   },
   workouts,
@@ -108,15 +115,22 @@ test("history ignores non-completed workouts and returns RIR-aware metrics", () 
   assert.match(result.setSummary, /RIR 2/);
 });
 
-test("RIR labels use 0, 1, 2, and 2+", () => {
+test("logged RIR uses a simple 2+ bucket while targets stay precise", () => {
+  assert.deepEqual(RIR_OPTIONS, [0, 1, 2]);
+  assert.deepEqual(TARGET_RIR_OPTIONS, [0, 1, 2]);
   assert.equal(formatRirLabel(0), "0");
   assert.equal(formatRirLabel(1), "1");
   assert.equal(formatRirLabel(2), "2");
-  assert.equal(formatRirLabel(3), "2+");
-  assert.equal(formatRir(3), "RIR 2+");
+  assert.equal(formatRirLabel(3), "3");
+  assert.equal(formatLoggedRirLabel(2), "2+");
+  assert.equal(formatLoggedRirLabel(4), "2+");
+  assert.equal(formatRir(2), "RIR 2+");
   assert.equal(formatRir(null), "RIR ?");
-  assert.equal(normalizeRir(5), 3);
-  assert.equal(normalizeRir(4), 3);
+  assert.equal(formatRirMeaning(0), "Technical failure");
+  assert.equal(formatRirMeaning(2), "2 clean reps left");
+  assert.match(formatRirSetInstruction(2), /2 more clean reps/);
+  assert.equal(normalizeRir(5), 2);
+  assert.equal(normalizeRir(4), 2);
   assert.equal(normalizeRir(2.9), 2);
   assert.equal(normalizeRir(-1), 0);
 });
@@ -125,7 +139,7 @@ test("double progression increases only after every set reaches the top at targe
   const result = progressionRecommendation(
     exercise({
       sets: [
-        set({ id: "a", actualReps: 12, actualRir: 3 }), // 2+
+        set({ id: "a", actualReps: 12, actualRir: 2 }),
         set({ id: "b", actualReps: 12, actualRir: 2 }),
         set({ id: "c", actualReps: 12, actualRir: 2 }),
       ],
@@ -172,7 +186,88 @@ test("missing RIR produces no automatic progression decision", () => {
     exercise({ sets: [set(), set({ id: "b" }), set({ id: "c", actualRir: null })] }),
   );
   assert.equal(result.kind, "insufficient");
+  assert.equal(result.nextWeight, null);
   assert.match(result.detail, /Log RIR/i);
+});
+
+test("incomplete or mixed-weight attempts do not update the next weight", () => {
+  const incomplete = progressionRecommendation(
+    exercise({
+      sets: [
+        set({ id: "a" }),
+        set({ id: "b", completed: false }),
+        set({ id: "c", completed: false }),
+      ],
+    }),
+  );
+  const mixedWeight = progressionRecommendation(
+    exercise({
+      sets: [
+        set({ id: "a", actualWeight: 50 }),
+        set({ id: "b", actualWeight: 47.5 }),
+        set({ id: "c", actualWeight: 50 }),
+      ],
+    }),
+  );
+
+  assert.equal(incomplete.kind, "insufficient");
+  assert.equal(incomplete.nextWeight, null);
+  assert.equal(mixedWeight.kind, "insufficient");
+  assert.equal(mixedWeight.nextWeight, null);
+});
+
+test("saving history as a template ignores legacy insufficient recommendations", () => {
+  const completed = workout({
+    exercises: [
+      exercise({
+        sets: [set({ actualWeight: 50 })],
+        progression: {
+          kind: "insufficient",
+          nextWeight: 60,
+          title: "Keep the working weight",
+          detail: "Complete all planned sets.",
+        },
+      }),
+    ],
+  });
+
+  assert.equal(workoutToTemplate(completed).exercises[0]?.targetWeight, 50);
+});
+
+test("a reduction requires two comparable completed attempts", () => {
+  const missed = exercise({
+    sets: [
+      set({ id: "a", actualReps: 8, actualRir: 1 }),
+      set({ id: "b", actualReps: 7, actualRir: 0 }),
+      set({ id: "c", actualReps: 6, actualRir: 0 }),
+    ],
+  });
+  const incompletePrevious = exercise({
+    sets: [
+      set({ id: "a", actualReps: 7, actualRir: 0 }),
+      set({ id: "b", actualReps: 6, actualRir: 0 }),
+      set({ id: "c", completed: false }),
+    ],
+  });
+  const differentWeightPrevious = exercise({
+    sets: missed.sets.map((item) => ({ ...item, actualWeight: 47.5 })),
+  });
+  const differentRangePrevious = exercise({
+    sets: missed.sets.map((item) => ({ ...item, prescribedRepMin: 8 })),
+  });
+
+  assert.equal(
+    progressionRecommendation(missed, incompletePrevious).kind,
+    "hold",
+  );
+  assert.equal(
+    progressionRecommendation(missed, differentWeightPrevious).kind,
+    "hold",
+  );
+  assert.equal(
+    progressionRecommendation(missed, differentRangePrevious).kind,
+    "hold",
+  );
 });
 
 test("CSV exports prescription, RIR, and progression fields", () => {
@@ -227,7 +322,7 @@ test("loading old local state starts fresh without migration", () => {
   );
 });
 
-test("loading current state adds the rest timer sound preference", () => {
+test("loading current state adds newer preferences", () => {
   const currentWithoutSoundPreference = {
     ...state(),
     preferences: { defaultRestSeconds: 120, installHintDismissed: false },
@@ -236,11 +331,12 @@ test("loading current state adds the rest timer sound preference", () => {
   assert.deepEqual(loadCurrentState(currentWithoutSoundPreference).preferences, {
     defaultRestSeconds: 120,
     restTimerSoundEnabled: true,
+    preventScreenLock: true,
     installHintDismissed: false,
   });
 });
 
-test("loading current state clamps legacy RIR values to 0–2+", () => {
+test("loading current state clamps targets and logged effort to the 2+ ceiling", () => {
   const loaded = loadCurrentState({
     ...state([
       workout({
@@ -280,9 +376,9 @@ test("loading current state clamps legacy RIR values to 0–2+", () => {
     ],
   });
 
-  assert.equal(loaded.templates[0]?.exercises[0]?.targetRir, 3);
-  assert.equal(loaded.workouts[0]?.exercises[0]?.sets[0]?.prescribedRir, 3);
-  assert.equal(loaded.workouts[0]?.exercises[0]?.sets[0]?.actualRir, 3);
+  assert.equal(loaded.templates[0]?.exercises[0]?.targetRir, 2);
+  assert.equal(loaded.workouts[0]?.exercises[0]?.sets[0]?.prescribedRir, 2);
+  assert.equal(loaded.workouts[0]?.exercises[0]?.sets[0]?.actualRir, 2);
 });
 
 test("backup import rejects malformed files", () => {

@@ -2,8 +2,8 @@
 
 import {
   ChangeEvent,
-  FocusEvent,
   FormEvent,
+  InputHTMLAttributes,
   useCallback,
   useEffect,
   useMemo,
@@ -30,7 +30,10 @@ import {
   exportCsv,
   exportJson,
   formatDuration,
+  formatLoggedRirLabel,
   formatRirLabel,
+  formatRirMeaning,
+  formatRirSetInstruction,
   formatWeight,
   normalizeExerciseName,
   RIR_OPTIONS,
@@ -41,6 +44,7 @@ import {
   startCustomWorkout,
   startTemplateWorkout,
   SUGGESTED_EXERCISES,
+  TARGET_RIR_OPTIONS,
   TemplateExercise,
   WorkoutExercise,
   WorkoutSession,
@@ -50,6 +54,18 @@ import {
 
 type Tab = "home" | "templates" | "history" | "settings";
 type ChartMetric = "e1rm" | "volume";
+type ScreenWakeLockStatus =
+  | "requesting"
+  | "active"
+  | "off"
+  | "unsupported"
+  | "unavailable";
+
+interface ScreenWakeLockSentinel {
+  release(): Promise<void>;
+  addEventListener(type: "release", listener: () => void): void;
+  removeEventListener(type: "release", listener: () => void): void;
+}
 
 const tabItems: { id: Tab; label: string; icon: string }[] = [
   { id: "home", label: "Home", icon: "●" },
@@ -57,6 +73,8 @@ const tabItems: { id: Tab; label: string; icon: string }[] = [
   { id: "history", label: "History", icon: "↗" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
+
+const REST_OPTIONS = [30, 60, 90, 120, 180, 240, 300];
 
 function cloneEmptyState(): AppState {
   return structuredClone(EMPTY_STATE);
@@ -86,33 +104,69 @@ function countCompletedSets(workout: WorkoutSession): number {
   );
 }
 
-function selectNumericValue(event: FocusEvent<HTMLInputElement>) {
-  const input = event.currentTarget;
-  input.dataset.replaceOnNextInput = "true";
-  input.dataset.initialNumericValue = input.value;
-  window.requestAnimationFrame(() => {
-    if (document.activeElement === input) input.select();
-  });
-}
+type NumericInputProps = Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  "type" | "value" | "onChange"
+> & {
+  value: number | null;
+  onValueChange: (value: string) => void;
+};
 
-function numericInputValue(event: ChangeEvent<HTMLInputElement>): string {
-  const input = event.currentTarget;
-  let value = input.value;
-  if (input.dataset.replaceOnNextInput === "true") {
-    const initialValue = input.dataset.initialNumericValue ?? "";
-    if (initialValue && value !== initialValue) {
-      const initialIndex = value.indexOf(initialValue);
-      if (initialIndex >= 0) {
-        value =
-          value.slice(0, initialIndex) +
-          value.slice(initialIndex + initialValue.length);
-        input.value = value;
-      }
-    }
-    delete input.dataset.replaceOnNextInput;
-    delete input.dataset.initialNumericValue;
-  }
-  return value;
+/**
+ * Keeps the user's text intact while the field is active. Converting every
+ * keystroke to a number makes React rewrite the input (notably for decimals),
+ * which moves the caret to the end in iOS Safari. A text input with a numeric
+ * input mode also gives Safari reliable text-selection APIs and the same
+ * numeric keyboard without the browser's number-field cursor quirks.
+ */
+function NumericInput({ value, onValueChange, ...props }: NumericInputProps) {
+  const [draft, setDraft] = useState(() => value?.toString() ?? "");
+  const focused = useRef(false);
+  const selectOnFirstClick = useRef(false);
+
+  useEffect(() => {
+    if (!focused.current) setDraft(value?.toString() ?? "");
+  }, [value]);
+
+  return (
+    <input
+      {...props}
+      type="text"
+      pattern={props.inputMode === "decimal" ? "[0-9]*[.,]?[0-9]*" : "[0-9]*"}
+      value={draft}
+      onFocus={(event) => {
+        focused.current = true;
+        selectOnFirstClick.current = true;
+        event.currentTarget.select();
+      }}
+      onClick={(event) => {
+        // A pointer click can place the caret after focus. Re-select once so
+        // the first digit replaces the complete value, including on iOS.
+        if (selectOnFirstClick.current) {
+          event.currentTarget.select();
+          selectOnFirstClick.current = false;
+        }
+      }}
+      onChange={(event) => {
+        const nextDraft = event.currentTarget.value;
+        const normalized = nextDraft.replace(",", ".");
+        const valid =
+          props.inputMode === "decimal"
+            ? /^\d*(?:\.\d*)?$/.test(normalized)
+            : /^\d*$/.test(normalized);
+        if (!valid) return;
+        setDraft(nextDraft);
+        if (normalized === "" || Number.isFinite(Number(normalized))) {
+          onValueChange(normalized);
+        }
+      }}
+      onBlur={() => {
+        focused.current = false;
+        selectOnFirstClick.current = false;
+        setDraft(value?.toString() ?? "");
+      }}
+    />
+  );
 }
 
 export default function WorkoutApp() {
@@ -135,9 +189,12 @@ export default function WorkoutApp() {
   const [storagePersistence, setStoragePersistence] =
     useState<StoragePersistenceStatus | null>(null);
   const [backupMessage, setBackupMessage] = useState("");
+  const [screenWakeLockStatus, setScreenWakeLockStatus] =
+    useState<ScreenWakeLockStatus>("requesting");
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restAudioContext = useRef<AudioContext | null>(null);
   const notifiedRestDeadline = useRef<number | null>(null);
+  const screenWakeLock = useRef<ScreenWakeLockSentinel | null>(null);
 
   const activeWorkout = useMemo(
     () => state.workouts.find((workout) => workout.status === "active") ?? null,
@@ -198,6 +255,76 @@ export default function WorkoutApp() {
     const interval = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+
+    let cancelled = false;
+    const wakeLockNavigator = navigator as Navigator & {
+      wakeLock?: {
+        request(type: "screen"): Promise<ScreenWakeLockSentinel>;
+      };
+    };
+
+    const releaseCurrentLock = () => {
+      const sentinel = screenWakeLock.current;
+      screenWakeLock.current = null;
+      if (sentinel) void sentinel.release().catch(() => undefined);
+    };
+
+    if (!state.preferences.preventScreenLock) {
+      releaseCurrentLock();
+      return;
+    }
+
+    if (!wakeLockNavigator.wakeLock) {
+      queueMicrotask(() => {
+        if (!cancelled) setScreenWakeLockStatus("unsupported");
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const requestLock = async () => {
+      if (document.visibilityState !== "visible" || screenWakeLock.current) {
+        return;
+      }
+      setScreenWakeLockStatus("requesting");
+      try {
+        const sentinel = await wakeLockNavigator.wakeLock?.request("screen");
+        if (!sentinel) throw new Error("Screen wake lock unavailable");
+        if (cancelled) {
+          void sentinel.release().catch(() => undefined);
+          return;
+        }
+        screenWakeLock.current = sentinel;
+        const handleRelease = () => {
+          sentinel.removeEventListener("release", handleRelease);
+          if (screenWakeLock.current === sentinel) {
+            screenWakeLock.current = null;
+            if (!cancelled) setScreenWakeLockStatus("unavailable");
+          }
+        };
+        sentinel.addEventListener("release", handleRelease);
+        setScreenWakeLockStatus("active");
+      } catch {
+        if (!cancelled) setScreenWakeLockStatus("unavailable");
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") void requestLock();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    void requestLock();
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      releaseCurrentLock();
+    };
+  }, [loaded, state.preferences.preventScreenLock]);
 
   useEffect(() => {
     if (
@@ -875,6 +1002,20 @@ export default function WorkoutApp() {
         {activeTab === "settings" && (
           <SettingsView
             state={state}
+            screenWakeLockStatus={
+              state.preferences.preventScreenLock
+                ? screenWakeLockStatus
+                : "off"
+            }
+            onPreventScreenLockChange={(enabled) =>
+              setState((current) => ({
+                ...current,
+                preferences: {
+                  ...current.preferences,
+                  preventScreenLock: enabled,
+                },
+              }))
+            }
             onRestChange={(seconds) =>
               setState((current) => ({
                 ...current,
@@ -1174,18 +1315,16 @@ function TemplatesView({
                 <div className="prescription-grid">
                   <label>
                     <span>Sets</span>
-                    <input
-                      type="number"
+                    <NumericInput
                       min="1"
                       max="10"
                       inputMode="numeric"
                       value={exercise.setCount}
-                      onFocus={selectNumericValue}
-                      onChange={(event) =>
+                      onValueChange={(value) =>
                         updateExerciseFields(template.id, exercise.id, {
                           setCount: Math.max(
                             1,
-                            Math.min(10, Number(numericInputValue(event))),
+                            Math.min(10, Number(value)),
                           ),
                         })
                       }
@@ -1193,17 +1332,12 @@ function TemplatesView({
                   </label>
                   <label>
                     <span>Reps from</span>
-                    <input
-                      type="number"
+                    <NumericInput
                       min="1"
                       inputMode="numeric"
                       value={exercise.repMin}
-                      onFocus={selectNumericValue}
-                      onChange={(event) => {
-                        const repMin = Math.max(
-                          1,
-                          Number(numericInputValue(event)),
-                        );
+                      onValueChange={(value) => {
+                        const repMin = Math.max(1, Number(value));
                         updateExerciseFields(template.id, exercise.id, {
                           repMin,
                           repMax: Math.max(repMin, exercise.repMax),
@@ -1213,24 +1347,22 @@ function TemplatesView({
                   </label>
                   <label>
                     <span>Reps to</span>
-                    <input
-                      type="number"
+                    <NumericInput
                       min={exercise.repMin}
                       inputMode="numeric"
                       value={exercise.repMax}
-                      onFocus={selectNumericValue}
-                      onChange={(event) =>
+                      onValueChange={(value) =>
                         updateExerciseFields(template.id, exercise.id, {
                           repMax: Math.max(
                             exercise.repMin,
-                            Number(numericInputValue(event)),
+                            Number(value),
                           ),
                         })
                       }
                     />
                   </label>
                   <label>
-                    <span>Target RIR</span>
+                    <span>Stop at RIR</span>
                     <select
                       value={exercise.targetRir}
                       onChange={(event) =>
@@ -1239,7 +1371,7 @@ function TemplatesView({
                         })
                       }
                     >
-                      {RIR_OPTIONS.map((rir) => (
+                      {TARGET_RIR_OPTIONS.map((rir) => (
                         <option value={rir} key={rir}>
                           {formatRirLabel(rir)}
                         </option>
@@ -1248,16 +1380,13 @@ function TemplatesView({
                   </label>
                   <label>
                     <span>Working kg</span>
-                    <input
-                      type="number"
+                    <NumericInput
                       min="0"
                       step="0.5"
                       inputMode="decimal"
                       placeholder="Bodyweight"
-                      value={exercise.targetWeight ?? ""}
-                      onFocus={selectNumericValue}
-                      onChange={(event) => {
-                        const value = numericInputValue(event);
+                      value={exercise.targetWeight}
+                      onValueChange={(value) => {
                         updateExerciseFields(template.id, exercise.id, {
                           targetWeight: value === "" ? null : Number(value),
                         });
@@ -1266,23 +1395,32 @@ function TemplatesView({
                   </label>
                   <label>
                     <span>Increase kg</span>
-                    <input
-                      type="number"
+                    <NumericInput
                       min="0.5"
                       step="0.5"
                       inputMode="decimal"
                       value={exercise.incrementKg}
-                      onFocus={selectNumericValue}
-                      onChange={(event) =>
+                      onValueChange={(value) =>
                         updateExerciseFields(template.id, exercise.id, {
                           incrementKg: Math.max(
                             0.5,
-                            Number(numericInputValue(event)),
+                            Number(value),
                           ),
                         })
                       }
                     />
                   </label>
+                </div>
+                <div className="template-effort-hint">
+                  <strong>
+                    RIR {formatRirLabel(exercise.targetRir)} ·{" "}
+                    {formatRirMeaning(exercise.targetRir)}
+                  </strong>
+                  <p>{formatRirSetInstruction(exercise.targetRir)}</p>
+                  <small>
+                    RIR 2 is a practical default. Failure (RIR 0) is optional,
+                    not required for progress.
+                  </small>
                 </div>
                 <div className="editor-actions">
                   <span className="progression-mode">Double progression</span>
@@ -1304,7 +1442,7 @@ function TemplatesView({
                         }))
                       }
                     >
-                      {[30, 60, 90, 120, 180].map((seconds) => (
+                      {REST_OPTIONS.map((seconds) => (
                         <option value={seconds} key={seconds}>
                           {seconds}s
                         </option>
@@ -1561,6 +1699,49 @@ function ActiveWorkoutView({
               </span>
             </section>
 
+            {current.sets[0] && (
+              <section className="set-goal-card" aria-label="How to perform each set">
+                <div className="set-goal-badge">
+                  <span>Stop at</span>
+                  <strong>RIR {formatRirLabel(current.sets[0].prescribedRir)}</strong>
+                </div>
+                <div className="set-goal-copy">
+                  <span className="eyebrow">Your goal for each work set</span>
+                  <h2>
+                    Do {current.sets[0].prescribedRepMin}–
+                    {current.sets[0].prescribedRepMax} clean reps.
+                  </h2>
+                  <p>
+                    {formatRirSetInstruction(current.sets[0].prescribedRir)}{" "}
+                    Then log the reps completed and the RIR you actually had.
+                  </p>
+                  <details>
+                    <summary>How the rep range and RIR work together</summary>
+                    <ul>
+                      <li>
+                        If you reach {current.sets[0].prescribedRepMax} and could
+                        do more than the target, stop there and log the higher RIR.
+                      </li>
+                      <li>
+                        If the target RIR arrives between{" "}
+                        {current.sets[0].prescribedRepMin} and{" "}
+                        {current.sets[0].prescribedRepMax} reps, end the set there.
+                      </li>
+                      <li>
+                        If it arrives before {current.sets[0].prescribedRepMin},
+                        stop anyway and log the miss; the weight was too heavy
+                        today.
+                      </li>
+                      <li>
+                        RIR 0 means technical failure. Do not deliberately train to
+                        failure unless the plan says RIR 0.
+                      </li>
+                    </ul>
+                  </details>
+                </div>
+              </section>
+            )}
+
             {history.length > 0 && (
               <section className="history-hint">
                 <div className="history-hint-heading">
@@ -1638,16 +1819,13 @@ function ActiveWorkoutView({
                   <span className="set-number">{index + 1}</span>
                   <label>
                     <span className="sr-only">Weight for set {index + 1}</span>
-                    <input
-                      type="number"
+                    <NumericInput
                       min="0"
                       step="0.5"
                       inputMode="decimal"
                       placeholder="—"
-                      value={set.actualWeight ?? ""}
-                      onFocus={selectNumericValue}
-                      onChange={(event) => {
-                        const value = numericInputValue(event);
+                      value={set.actualWeight}
+                      onValueChange={(value) => {
                         onUpdateSet(
                           set.id,
                           "actualWeight",
@@ -1658,14 +1836,11 @@ function ActiveWorkoutView({
                   </label>
                   <label>
                     <span className="sr-only">Reps for set {index + 1}</span>
-                    <input
-                      type="number"
+                    <NumericInput
                       min="0"
                       inputMode="numeric"
                       value={set.actualReps}
-                      onFocus={selectNumericValue}
-                      onChange={(event) => {
-                        const value = numericInputValue(event);
+                      onValueChange={(value) => {
                         onUpdateSet(
                           set.id,
                           "actualReps",
@@ -1692,7 +1867,7 @@ function ActiveWorkoutView({
                       <option value="">?</option>
                       {RIR_OPTIONS.map((rir) => (
                         <option value={rir} key={rir}>
-                          {formatRirLabel(rir)}
+                          {formatLoggedRirLabel(rir)}
                         </option>
                       ))}
                     </select>
@@ -1709,6 +1884,12 @@ function ActiveWorkoutView({
                   </button>
                 </div>
               ))}
+              <p className="rir-log-hint">
+                <strong>Log actual RIR after each set:</strong> 0 = no clean reps
+                left, 1 = one left, and 2+ = two or more left. Higher RIR is
+                intentionally grouped because it is difficult to estimate
+                precisely. It is not a test you need to take to failure.
+              </p>
               <div className="sets-footer">
                 <button
                   className="text-button"
@@ -1742,7 +1923,7 @@ function ActiveWorkoutView({
                       }))
                     }
                   >
-                    {[30, 60, 90, 120, 180].map((seconds) => (
+                    {REST_OPTIONS.map((seconds) => (
                       <option value={seconds} key={seconds}>
                         {seconds}s
                       </option>
@@ -2125,6 +2306,8 @@ function HistoryRow({
 
 function SettingsView({
   state,
+  screenWakeLockStatus,
+  onPreventScreenLockChange,
   onRestChange,
   onExportJson,
   onExportCsv,
@@ -2133,6 +2316,8 @@ function SettingsView({
   backupMessage,
 }: {
   state: AppState;
+  screenWakeLockStatus: ScreenWakeLockStatus;
+  onPreventScreenLockChange: (enabled: boolean) => void;
   onRestChange: (seconds: number) => void;
   onExportJson: () => void;
   onExportCsv: () => void;
@@ -2151,19 +2336,55 @@ function SettingsView({
           <div>
             <span className="eyebrow">Workout defaults</span>
             <h2>Rest timer</h2>
-            <p>Used for new exercises. You can change it during any workout.</p>
+            <p>
+              Used for new exercises. Treat it as a guide: demanding compound
+              lifts often need 2–3+ minutes; smaller isolation work may need less.
+              Start the next set when you feel ready to repeat the effort.
+            </p>
           </div>
           <select
             value={state.preferences.defaultRestSeconds}
             onChange={(event) => onRestChange(Number(event.target.value))}
             aria-label="Default rest time"
           >
-            {[30, 60, 90, 120, 180].map((seconds) => (
+            {REST_OPTIONS.map((seconds) => (
               <option value={seconds} key={seconds}>
                 {seconds}s
               </option>
             ))}
           </select>
+        </div>
+      </section>
+
+      <section className="section-card">
+        <div className="settings-row">
+          <div>
+            <span className="eyebrow">Display</span>
+            <h2>Keep screen awake</h2>
+            <p>
+              {screenWakeLockStatus === "active"
+                ? "Active while Workout Tracker is open and visible."
+                : screenWakeLockStatus === "requesting"
+                  ? "Requesting permission to keep the display awake…"
+                  : screenWakeLockStatus === "unsupported"
+                    ? "This browser does not support preventing automatic screen lock."
+                    : screenWakeLockStatus === "unavailable"
+                      ? "Currently unavailable. The app will try again when you return to it."
+                      : "The iPhone can lock normally."}
+            </p>
+          </div>
+          <label className="setting-switch">
+            <input
+              type="checkbox"
+              role="switch"
+              checked={state.preferences.preventScreenLock}
+              onChange={(event) =>
+                onPreventScreenLockChange(event.currentTarget.checked)
+              }
+            />
+            <span aria-hidden="true" />
+            <span className="sr-only">Keep screen awake</span>
+          </label>
         </div>
       </section>
 

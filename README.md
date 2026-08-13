@@ -13,6 +13,7 @@ iPhone Home Screen.
 - Private on-device IndexedDB storage
 - JSON and CSV exports
 - Installable PWA with offline app-shell caching
+- Optional screen wake lock to prevent the display sleeping during workouts
 
 ## Development
 

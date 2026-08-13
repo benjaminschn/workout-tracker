@@ -78,6 +78,7 @@ export interface WorkoutSession {
 export interface Preferences {
   defaultRestSeconds: number;
   restTimerSoundEnabled: boolean;
+  preventScreenLock: boolean;
   installHintDismissed: boolean;
 }
 
@@ -123,8 +124,9 @@ export const EMPTY_STATE: AppState = {
   templates: [],
   workouts: [],
   preferences: {
-    defaultRestSeconds: 90,
+    defaultRestSeconds: 120,
     restTimerSoundEnabled: true,
+    preventScreenLock: true,
     installHintDismissed: false,
   },
 };
@@ -283,7 +285,11 @@ export function workoutToTemplate(
         repMax: first?.prescribedRepMax ?? 12,
         targetRir: first?.prescribedRir ?? 2,
         targetWeight:
-          exercise.progression?.nextWeight ?? firstCompleted?.actualWeight ?? null,
+          exercise.progression?.kind !== "insufficient"
+            ? (exercise.progression?.nextWeight ??
+              firstCompleted?.actualWeight ??
+              null)
+            : (firstCompleted?.actualWeight ?? null),
         incrementKg: exercise.incrementKg,
       };
     }),
@@ -315,19 +321,38 @@ export function formatWeight(value: number | null): string {
   return `${Number.isInteger(value) ? value : value.toFixed(1)} kg`;
 }
 
-/** Allowed RIR values. `3` is the open-ended bucket displayed as "2+". */
-export const RIR_OPTIONS = [0, 1, 2, 3] as const;
-export const RIR_PLUS_VALUE = 3;
+/** Logged RIR values. Two is the open-ended 2+ bucket. */
+export const RIR_OPTIONS = [0, 1, 2] as const;
+export const TARGET_RIR_OPTIONS = [0, 1, 2] as const;
+export const RIR_PLUS_VALUE = 2;
 
 export function formatRirLabel(value: number): string {
-  return value >= RIR_PLUS_VALUE ? "2+" : String(value);
+  return String(value);
+}
+
+export function formatLoggedRirLabel(value: number): string {
+  return value >= RIR_PLUS_VALUE ? `${RIR_PLUS_VALUE}+` : String(value);
 }
 
 export function formatRir(value: number | null): string {
-  return value === null ? "RIR ?" : `RIR ${formatRirLabel(value)}`;
+  return value === null ? "RIR ?" : `RIR ${formatLoggedRirLabel(value)}`;
 }
 
-/** Clamp RIR to 0, 1, 2, or 2+ (stored as 3). Legacy 3/4/5 become 2+. */
+export function formatRirMeaning(value: number): string {
+  if (value <= 0) return "Technical failure";
+  return `${value} clean rep${value === 1 ? "" : "s"} left`;
+}
+
+export function formatRirSetInstruction(value: number): string {
+  if (value <= 0) {
+    return "Stop at technical failure—when another clean rep is not possible.";
+  }
+  return `Stop when you could do about ${value} more clean rep${
+    value === 1 ? "" : "s"
+  } with the same technique.`;
+}
+
+/** Clamp logged RIR to 0, 1, or the open-ended 2+ bucket (stored as 2). */
 export function normalizeRir(value: number): number {
   if (!Number.isFinite(value) || value < 0) return 0;
   if (value >= RIR_PLUS_VALUE) return RIR_PLUS_VALUE;
@@ -336,6 +361,11 @@ export function normalizeRir(value: number): number {
 
 export function normalizeNullableRir(value: number | null): number | null {
   return value === null ? null : normalizeRir(value);
+}
+
+export function normalizeTargetRir(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.min(TARGET_RIR_OPTIONS.at(-1) ?? 2, Math.trunc(value));
 }
 
 export function formatSetSummary(sets: WorkoutSet[]): string {
@@ -370,12 +400,37 @@ function isHardMiss(exercise: WorkoutExercise): boolean {
   return hardMisses.length >= Math.min(2, exercise.sets.length);
 }
 
+function isComparableCompletedAttempt(
+  exercise: WorkoutExercise,
+  workingWeight: number | null,
+  prescription: WorkoutSet[],
+): boolean {
+  const sets = completedSets(exercise);
+  if (
+    sets.length !== exercise.sets.length ||
+    sets.some((set) => set.actualRir === null) ||
+    commonWorkingWeight(sets) !== workingWeight ||
+    sets.length !== prescription.length
+  ) {
+    return false;
+  }
+
+  return sets.every((set, index) => {
+    const current = prescription[index];
+    return (
+      current !== undefined &&
+      set.prescribedRepMin === current.prescribedRepMin &&
+      set.prescribedRepMax === current.prescribedRepMax &&
+      set.prescribedRir === current.prescribedRir
+    );
+  });
+}
+
 export function progressionRecommendation(
   exercise: WorkoutExercise,
   previousExercise?: WorkoutExercise,
 ): ProgressionRecommendation {
   const sets = completedSets(exercise);
-  const fallbackWeight = sets[0]?.actualWeight ?? null;
 
   if (sets.length === 0) {
     return {
@@ -389,7 +444,7 @@ export function progressionRecommendation(
   if (sets.length !== exercise.sets.length) {
     return {
       kind: "insufficient",
-      nextWeight: fallbackWeight,
+      nextWeight: null,
       title: "Keep the working weight",
       detail: "Complete all planned sets for a progression recommendation.",
     };
@@ -398,7 +453,7 @@ export function progressionRecommendation(
   if (sets.some((set) => set.actualRir === null)) {
     return {
       kind: "insufficient",
-      nextWeight: fallbackWeight,
+      nextWeight: null,
       title: "Keep the working weight",
       detail: "Log RIR for every set so effort can be compared.",
     };
@@ -408,7 +463,7 @@ export function progressionRecommendation(
   if (workingWeight === undefined) {
     return {
       kind: "insufficient",
-      nextWeight: fallbackWeight,
+      nextWeight: null,
       title: "Keep the working weight",
       detail: "Use one working weight across the sets for double progression.",
     };
@@ -440,6 +495,7 @@ export function progressionRecommendation(
   if (
     isHardMiss(exercise) &&
     previousExercise &&
+    isComparableCompletedAttempt(previousExercise, workingWeight, sets) &&
     isHardMiss(previousExercise) &&
     workingWeight !== null &&
     workingWeight > 0
@@ -661,14 +717,14 @@ export function parseAppStateBackup(contents: string): AppState {
 function normalizeTemplateExercise(exercise: TemplateExercise): TemplateExercise {
   return {
     ...exercise,
-    targetRir: normalizeRir(exercise.targetRir),
+    targetRir: normalizeTargetRir(exercise.targetRir),
   };
 }
 
 function normalizeWorkoutSet(set: WorkoutSet): WorkoutSet {
   return {
     ...set,
-    prescribedRir: normalizeRir(set.prescribedRir),
+    prescribedRir: normalizeTargetRir(set.prescribedRir),
     actualRir: normalizeNullableRir(set.actualRir),
   };
 }
