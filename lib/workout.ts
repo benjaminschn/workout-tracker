@@ -1,5 +1,12 @@
 export type WorkoutStatus = "active" | "completed" | "discarded";
 export type ProgressionKind = "increase" | "hold" | "reduce" | "insufficient";
+export type PrescriptionKind =
+  | "baseline"
+  | "progress"
+  | "hold"
+  | "increase"
+  | "reduce"
+  | "bodyweight";
 
 export interface Exercise {
   id: string;
@@ -18,7 +25,6 @@ export interface TemplateExercise {
   repMax: number;
   targetRir: number;
   targetWeight: number | null;
-  incrementKg: number;
 }
 
 export interface WorkoutTemplate {
@@ -33,6 +39,7 @@ export interface WorkoutSet {
   id: string;
   prescribedRepMin: number;
   prescribedRepMax: number;
+  prescribedReps: number;
   prescribedRir: number;
   prescribedWeight: number | null;
   actualReps: number;
@@ -49,13 +56,22 @@ export interface ProgressionRecommendation {
   detail: string;
 }
 
+export interface WorkoutPrescription {
+  kind: PrescriptionKind;
+  sourceWorkoutId: string | null;
+  sourceDate: number | null;
+  nominalWeight: number | null;
+  title: string;
+  detail: string;
+}
+
 export interface WorkoutExercise {
   id: string;
   exerciseId: string;
   name: string;
   restSeconds: number;
-  incrementKg: number;
   sets: WorkoutSet[];
+  prescription: WorkoutPrescription | null;
   progression: ProgressionRecommendation | null;
   completed: boolean;
   completedAt: number | null;
@@ -83,7 +99,7 @@ export interface Preferences {
 }
 
 export interface AppState {
-  schemaVersion: 2;
+  schemaVersion: 3;
   exercises: Exercise[];
   templates: WorkoutTemplate[];
   workouts: WorkoutSession[];
@@ -119,7 +135,7 @@ export const SUGGESTED_EXERCISES = [
 ];
 
 export const EMPTY_STATE: AppState = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   exercises: [],
   templates: [],
   workouts: [],
@@ -161,7 +177,6 @@ export function createTemplateExercise(
     repMax: 12,
     targetRir: 2,
     targetWeight: null,
-    incrementKg: 2.5,
   };
 }
 
@@ -170,14 +185,16 @@ export function createWorkoutSet(
   repMax = 12,
   prescribedRir = 2,
   prescribedWeight: number | null = null,
+  prescribedReps = repMin,
 ): WorkoutSet {
   return {
     id: createId("set"),
     prescribedRepMin: repMin,
     prescribedRepMax: repMax,
+    prescribedReps: Math.max(repMin, Math.min(repMax, prescribedReps)),
     prescribedRir,
     prescribedWeight,
-    actualReps: repMin,
+    actualReps: Math.max(repMin, Math.min(repMax, prescribedReps)),
     actualWeight: prescribedWeight,
     actualRir: null,
     completed: false,
@@ -196,23 +213,26 @@ function templateExerciseToWorkoutExercise(
     | "repMax"
     | "targetRir"
     | "targetWeight"
-    | "incrementKg"
   >,
+  prescribedReps?: number[],
+  prescribedWeight = exercise.targetWeight,
+  prescription: WorkoutPrescription | null = null,
 ): WorkoutExercise {
   return {
     id: createId("workout-exercise"),
     exerciseId: exercise.exerciseId,
     name: exercise.name,
     restSeconds: exercise.restSeconds,
-    incrementKg: exercise.incrementKg,
-    sets: Array.from({ length: exercise.setCount }, () =>
+    sets: Array.from({ length: exercise.setCount }, (_, index) =>
       createWorkoutSet(
         exercise.repMin,
         exercise.repMax,
         exercise.targetRir,
-        exercise.targetWeight,
+        prescribedWeight,
+        prescribedReps?.[index] ?? exercise.repMin,
       ),
     ),
+    prescription,
     progression: null,
     completed: false,
     completedAt: null,
@@ -226,6 +246,24 @@ export function createWorkoutExercise(
   return templateExerciseToWorkoutExercise(
     createTemplateExercise(exercise, restSeconds),
   );
+}
+
+export function updateUnfinishedSetWeights(
+  exercise: WorkoutExercise,
+  weight: number | null,
+): WorkoutExercise {
+  return {
+    ...exercise,
+    sets: exercise.sets.map((set) =>
+      set.completed
+        ? set
+        : {
+            ...set,
+            prescribedWeight: weight,
+            actualWeight: weight,
+          },
+    ),
+  };
 }
 
 export function startCustomWorkout(now = Date.now()): WorkoutSession {
@@ -246,6 +284,7 @@ export function startCustomWorkout(now = Date.now()): WorkoutSession {
 
 export function startTemplateWorkout(
   template: WorkoutTemplate,
+  state: AppState,
   now = Date.now(),
 ): WorkoutSession {
   return {
@@ -259,7 +298,15 @@ export function startTemplateWorkout(
     pausedTotalMs: 0,
     restDeadline: null,
     currentExerciseIndex: 0,
-    exercises: template.exercises.map(templateExerciseToWorkoutExercise),
+    exercises: template.exercises.map((exercise) => {
+      const suggestion = templateExercisePrescription(state, exercise, now);
+      return templateExerciseToWorkoutExercise(
+        exercise,
+        suggestion.reps,
+        suggestion.prescription.nominalWeight,
+        suggestion.prescription,
+      );
+    }),
   };
 }
 
@@ -275,6 +322,7 @@ export function workoutToTemplate(
     exercises: workout.exercises.map((exercise) => {
       const first = exercise.sets[0];
       const firstCompleted = exercise.sets.find((set) => set.completed);
+      const commonWeight = commonCompletedWorkingWeight(exercise);
       return {
         id: createId("template-exercise"),
         exerciseId: exercise.exerciseId,
@@ -285,12 +333,9 @@ export function workoutToTemplate(
         repMax: first?.prescribedRepMax ?? 12,
         targetRir: first?.prescribedRir ?? 2,
         targetWeight:
-          exercise.progression?.kind !== "insufficient"
-            ? (exercise.progression?.nextWeight ??
-              firstCompleted?.actualWeight ??
-              null)
+          commonWeight !== undefined
+            ? commonWeight
             : (firstCompleted?.actualWeight ?? null),
-        incrementKg: exercise.incrementKg,
       };
     }),
   };
@@ -390,6 +435,31 @@ function commonWorkingWeight(sets: WorkoutSet[]): number | null | undefined {
   return weights.size === 1 ? sets[0]?.actualWeight : undefined;
 }
 
+export function commonCompletedWorkingWeight(
+  exercise: WorkoutExercise,
+): number | null | undefined {
+  return commonWorkingWeight(completedSets(exercise));
+}
+
+function roundToHalfKg(value: number): number {
+  return Math.round(value * 2) / 2;
+}
+
+export function suggestedIncreasedWeight(workingWeight: number): number {
+  if (!Number.isFinite(workingWeight) || workingWeight <= 0) return 0;
+  const minimumIncrease = Math.ceil((workingWeight + 0.5) * 2) / 2;
+  return Math.max(minimumIncrease, roundToHalfKg(workingWeight * 1.05));
+}
+
+export function suggestedReducedWeight(workingWeight: number): number {
+  if (!Number.isFinite(workingWeight) || workingWeight <= 0) return 0;
+  const minimumReduction = Math.floor((workingWeight - 0.5) * 2) / 2;
+  return Math.max(
+    0,
+    Math.min(minimumReduction, roundToHalfKg(workingWeight * 0.95)),
+  );
+}
+
 function isHardMiss(exercise: WorkoutExercise): boolean {
   const hardMisses = completedSets(exercise).filter(
     (set) =>
@@ -424,6 +494,163 @@ function isComparableCompletedAttempt(
       set.prescribedRir === current.prescribedRir
     );
   });
+}
+
+interface ExerciseAttempt {
+  workout: WorkoutSession;
+  exercise: WorkoutExercise;
+}
+
+function recentExerciseAttempts(
+  state: AppState,
+  exerciseId: string,
+  before: number,
+): ExerciseAttempt[] {
+  return state.workouts
+    .filter(
+      (workout) =>
+        workout.status === "completed" &&
+        (workout.endedAt ?? workout.startedAt) < before,
+    )
+    .flatMap((workout) =>
+      workout.exercises
+        .filter(
+          (exercise) =>
+            exercise.exerciseId === exerciseId &&
+            exercise.sets.some((set) => set.completed),
+        )
+        .map((exercise) => ({ workout, exercise })),
+    )
+    .sort(
+      (a, b) =>
+        (b.workout.endedAt ?? b.workout.startedAt) -
+        (a.workout.endedAt ?? a.workout.startedAt),
+    );
+}
+
+function isEligibleTemplateAttempt(
+  exercise: WorkoutExercise,
+  template: TemplateExercise,
+): boolean {
+  const sets = completedSets(exercise);
+  return (
+    exercise.sets.length === template.setCount &&
+    sets.length === template.setCount &&
+    sets.every(
+      (set) =>
+        set.actualRir !== null &&
+        set.prescribedRepMin === template.repMin &&
+        set.prescribedRepMax === template.repMax &&
+        set.prescribedRir === template.targetRir,
+    ) &&
+    commonWorkingWeight(sets) !== undefined
+  );
+}
+
+function clampRepTarget(value: number, template: TemplateExercise): number {
+  return Math.max(template.repMin, Math.min(template.repMax, value));
+}
+
+function templateExercisePrescription(
+  state: AppState,
+  template: TemplateExercise,
+  before: number,
+): { reps: number[]; prescription: WorkoutPrescription } {
+  const attempts = recentExerciseAttempts(state, template.exerciseId, before);
+  const latest = attempts[0];
+  const defaultReps = Array.from(
+    { length: template.setCount },
+    () => template.repMin,
+  );
+
+  if (!latest || !isEligibleTemplateAttempt(latest.exercise, template)) {
+    return {
+      reps: defaultReps,
+      prescription: {
+        kind: "baseline",
+        sourceWorkoutId: null,
+        sourceDate: null,
+        nominalWeight: template.targetWeight,
+        title: "Template starting point",
+        detail: latest
+          ? "The latest attempt was not complete and comparable, so this workout uses the template defaults."
+          : "No comparable history yet, so this workout uses the template defaults.",
+      },
+    };
+  }
+
+  const previous = attempts[1]?.exercise;
+  const recommendation = progressionRecommendation(latest.exercise, previous);
+  const sourceDate =
+    latest.workout.endedAt ?? latest.workout.startedAt;
+
+  if (
+    recommendation.kind === "increase" ||
+    recommendation.kind === "reduce"
+  ) {
+    const direction = recommendation.kind === "increase" ? "up" : "down";
+    return {
+      reps: defaultReps,
+      prescription: {
+        kind: recommendation.kind,
+        sourceWorkoutId: latest.workout.id,
+        sourceDate,
+        nominalWeight: recommendation.nextWeight,
+        title: recommendation.title,
+        detail: `Based on the latest comparable workout, reset to ${template.repMin} reps per set and round ${direction} to the closest weight this machine offers.`,
+      },
+    };
+  }
+
+  const latestSets = completedSets(latest.exercise);
+  const workingWeight = commonWorkingWeight(latestSets);
+  const allAtTop = latestSets.every(
+    (set) =>
+      set.actualReps >= template.repMax &&
+      (set.actualRir ?? -1) >= template.targetRir,
+  );
+
+  if (allAtTop && (workingWeight === null || workingWeight === 0)) {
+    return {
+      reps: latestSets.map(() => template.repMax),
+      prescription: {
+        kind: "bodyweight",
+        sourceWorkoutId: latest.workout.id,
+        sourceDate,
+        nominalWeight: workingWeight,
+        title: "Rep range completed",
+        detail:
+          "Keep the top rep target, then add external load or choose a harder variation when appropriate.",
+      },
+    };
+  }
+
+  const reps = latestSets.map((set) =>
+    clampRepTarget(
+      set.actualRir !== null && set.actualRir >= template.targetRir
+        ? set.actualReps + 1
+        : set.actualReps,
+      template,
+    ),
+  );
+  const progressed = reps.some(
+    (target, index) => target > clampRepTarget(latestSets[index]?.actualReps ?? 0, template),
+  );
+
+  return {
+    reps,
+    prescription: {
+      kind: progressed ? "progress" : "hold",
+      sourceWorkoutId: latest.workout.id,
+      sourceDate,
+      nominalWeight:
+        workingWeight !== undefined ? workingWeight : template.targetWeight,
+      title: progressed ? "Build one rep per successful set" : "Repeat the target",
+      detail: progressed
+        ? "Sets that met the target RIR advance by one rep; other sets repeat their last result."
+        : "The last result did not earn additional reps, so repeat it within the template range.",
+    },
+  };
 }
 
 export function progressionRecommendation(
@@ -483,7 +710,7 @@ export function progressionRecommendation(
         detail: "Add external load or choose a harder variation next time.",
       };
     }
-    const nextWeight = workingWeight + exercise.incrementKg;
+    const nextWeight = suggestedIncreasedWeight(workingWeight);
     return {
       kind: "increase",
       nextWeight,
@@ -500,7 +727,7 @@ export function progressionRecommendation(
     workingWeight !== null &&
     workingWeight > 0
   ) {
-    const nextWeight = Math.max(0, workingWeight - exercise.incrementKg);
+    const nextWeight = suggestedReducedWeight(workingWeight);
     return {
       kind: "reduce",
       nextWeight,
@@ -631,6 +858,7 @@ export function exportCsv(state: AppState): string {
       "set",
       "rep_range_min",
       "rep_range_max",
+      "target_reps",
       "target_rir",
       "completed_reps",
       "target_weight_kg",
@@ -656,6 +884,7 @@ export function exportCsv(state: AppState): string {
           index + 1,
           set.prescribedRepMin,
           set.prescribedRepMax,
+          set.prescribedReps,
           set.prescribedRir,
           set.actualReps,
           set.prescribedWeight ?? "",
@@ -695,7 +924,10 @@ export function parseAppStateBackup(contents: string): AppState {
   }
 
   const candidate = value as Record<string, unknown>;
-  if (candidate.app !== "Workout Tracker" || candidate.schemaVersion !== 2) {
+  if (
+    candidate.app !== "Workout Tracker" ||
+    (candidate.schemaVersion !== 2 && candidate.schemaVersion !== 3)
+  ) {
     throw new Error("This file is not a supported Workout Tracker backup.");
   }
 
@@ -714,31 +946,84 @@ export function parseAppStateBackup(contents: string): AppState {
   return loadCurrentState(candidate);
 }
 
-function normalizeTemplateExercise(exercise: TemplateExercise): TemplateExercise {
+type StoredWorkoutSet = Omit<WorkoutSet, "prescribedReps"> & {
+  prescribedReps?: number;
+};
+
+type StoredWorkoutExercise = Omit<
+  WorkoutExercise,
+  "prescription" | "sets"
+> & {
+  prescription?: WorkoutPrescription | null;
+  incrementKg?: number;
+  sets: StoredWorkoutSet[];
+};
+
+type StoredWorkoutSession = Omit<WorkoutSession, "exercises"> & {
+  exercises: StoredWorkoutExercise[];
+};
+
+type StoredTemplateExercise = TemplateExercise & { incrementKg?: number };
+
+function normalizeTemplateExercise(
+  exercise: StoredTemplateExercise,
+): TemplateExercise {
   return {
-    ...exercise,
+    id: exercise.id,
+    exerciseId: exercise.exerciseId,
+    name: exercise.name,
+    restSeconds: exercise.restSeconds,
+    setCount: exercise.setCount,
+    repMin: exercise.repMin,
+    repMax: exercise.repMax,
     targetRir: normalizeTargetRir(exercise.targetRir),
+    targetWeight: exercise.targetWeight,
   };
 }
 
-function normalizeWorkoutSet(set: WorkoutSet): WorkoutSet {
+function normalizeWorkoutSet(set: StoredWorkoutSet): WorkoutSet {
+  const suggestedReps = Number.isFinite(set.prescribedReps)
+    ? (set.prescribedReps as number)
+    : Number.isFinite(set.actualReps)
+      ? set.actualReps
+      : set.prescribedRepMin;
   return {
-    ...set,
+    id: set.id,
+    prescribedRepMin: set.prescribedRepMin,
+    prescribedRepMax: set.prescribedRepMax,
+    prescribedReps: Math.max(
+      set.prescribedRepMin,
+      Math.min(set.prescribedRepMax, suggestedReps),
+    ),
     prescribedRir: normalizeTargetRir(set.prescribedRir),
+    prescribedWeight: set.prescribedWeight,
+    actualReps: set.actualReps,
+    actualWeight: set.actualWeight,
     actualRir: normalizeNullableRir(set.actualRir),
+    completed: set.completed,
+    completedAt: set.completedAt,
   };
 }
 
-function normalizeWorkoutExercise(exercise: WorkoutExercise): WorkoutExercise {
+function normalizeWorkoutExercise(
+  exercise: StoredWorkoutExercise,
+): WorkoutExercise {
   return {
-    ...exercise,
+    id: exercise.id,
+    exerciseId: exercise.exerciseId,
+    name: exercise.name,
+    restSeconds: exercise.restSeconds,
     sets: Array.isArray(exercise.sets)
       ? exercise.sets.map(normalizeWorkoutSet)
       : [],
+    prescription: exercise.prescription ?? null,
+    progression: exercise.progression,
+    completed: exercise.completed,
+    completedAt: exercise.completedAt,
   };
 }
 
-function normalizeWorkout(workout: WorkoutSession): WorkoutSession {
+function normalizeWorkout(workout: StoredWorkoutSession): WorkoutSession {
   return {
     ...workout,
     exercises: Array.isArray(workout.exercises)
@@ -751,23 +1036,29 @@ function normalizeTemplate(template: WorkoutTemplate): WorkoutTemplate {
   return {
     ...template,
     exercises: Array.isArray(template.exercises)
-      ? template.exercises.map(normalizeTemplateExercise)
+      ? (template.exercises as StoredTemplateExercise[]).map(
+          normalizeTemplateExercise,
+        )
       : [],
   };
 }
 
 export function loadCurrentState(value: unknown): AppState {
   if (!value || typeof value !== "object") return structuredClone(EMPTY_STATE);
-  const candidate = value as Partial<AppState>;
-  if (candidate.schemaVersion !== 2) return structuredClone(EMPTY_STATE);
+  const candidate = value as Partial<Omit<AppState, "schemaVersion">> & {
+    schemaVersion?: number;
+  };
+  if (candidate.schemaVersion !== 2 && candidate.schemaVersion !== 3) {
+    return structuredClone(EMPTY_STATE);
+  }
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     exercises: Array.isArray(candidate.exercises) ? candidate.exercises : [],
     templates: Array.isArray(candidate.templates)
       ? candidate.templates.map(normalizeTemplate)
       : [],
     workouts: Array.isArray(candidate.workouts)
-      ? candidate.workouts.map(normalizeWorkout)
+      ? (candidate.workouts as StoredWorkoutSession[]).map(normalizeWorkout)
       : [],
     preferences: {
       ...EMPTY_STATE.preferences,

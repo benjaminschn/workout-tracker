@@ -18,6 +18,7 @@ import {
 } from "@/lib/repository";
 import {
   AppState,
+  commonCompletedWorkingWeight,
   createId,
   createTemplateExercise,
   createWorkoutExercise,
@@ -46,6 +47,7 @@ import {
   SUGGESTED_EXERCISES,
   TARGET_RIR_OPTIONS,
   TemplateExercise,
+  updateUnfinishedSetWeights,
   WorkoutExercise,
   WorkoutSession,
   WorkoutTemplate,
@@ -102,6 +104,14 @@ function countCompletedSets(workout: WorkoutSession): number {
       total + exercise.sets.filter((set) => set.completed).length,
     0,
   );
+}
+
+function formatRepTargets(sets: WorkoutExercise["sets"]): string {
+  if (sets.length === 0) return "No work sets";
+  const targets = sets.map((set) => set.prescribedReps);
+  return targets.every((target) => target === targets[0])
+    ? `${sets.length} × ${targets[0]}`
+    : targets.join(" / ");
 }
 
 type NumericInputProps = Omit<
@@ -446,10 +456,17 @@ export default function WorkoutApp() {
   function startTemplate(template: WorkoutTemplate) {
     if (activeWorkout) return;
     setCompletedWorkoutId(null);
-    setState((current) => ({
-      ...current,
-      workouts: [...current.workouts, startTemplateWorkout(template)],
-    }));
+    setState((current) => {
+      const storedTemplate =
+        current.templates.find((item) => item.id === template.id) ?? template;
+      return {
+        ...current,
+        workouts: [
+          ...current.workouts,
+          startTemplateWorkout(storedTemplate, current),
+        ],
+      };
+    });
     setOverviewOpen(false);
   }
 
@@ -627,16 +644,22 @@ export default function WorkoutApp() {
             : {
                 ...template,
                 updatedAt: endedAt,
-                exercises: template.exercises.map((templateExercise) => {
-                  const result = exercises.find(
-                    (exercise) =>
-                      exercise.exerciseId === templateExercise.exerciseId,
-                  );
-                  return result?.progression?.nextWeight !== undefined &&
-                    result.progression.nextWeight !== null
+                exercises: template.exercises.map((templateExercise, index) => {
+                  const indexedResult = exercises[index];
+                  const result =
+                    indexedResult?.exerciseId === templateExercise.exerciseId
+                      ? indexedResult
+                      : exercises.find(
+                          (exercise) =>
+                            exercise.exerciseId === templateExercise.exerciseId,
+                        );
+                  const actualWeight = result
+                    ? commonCompletedWorkingWeight(result)
+                    : undefined;
+                  return actualWeight !== undefined
                     ? {
                         ...templateExercise,
-                        targetWeight: result.progression.nextWeight,
+                        targetWeight: actualWeight,
                       }
                     : templateExercise;
                 }),
@@ -1379,7 +1402,7 @@ function TemplatesView({
                     </select>
                   </label>
                   <label>
-                    <span>Working kg</span>
+                    <span>Baseline kg</span>
                     <NumericInput
                       min="0"
                       step="0.5"
@@ -1393,23 +1416,6 @@ function TemplatesView({
                       }}
                     />
                   </label>
-                  <label>
-                    <span>Increase kg</span>
-                    <NumericInput
-                      min="0.5"
-                      step="0.5"
-                      inputMode="decimal"
-                      value={exercise.incrementKg}
-                      onValueChange={(value) =>
-                        updateExerciseFields(template.id, exercise.id, {
-                          incrementKg: Math.max(
-                            0.5,
-                            Number(value),
-                          ),
-                        })
-                      }
-                    />
-                  </label>
                 </div>
                 <div className="template-effort-hint">
                   <strong>
@@ -1419,7 +1425,9 @@ function TemplatesView({
                   <p>{formatRirSetInstruction(exercise.targetRir)}</p>
                   <small>
                     RIR 2 is a practical default. Failure (RIR 0) is optional,
-                    not required for progress.
+                    not required for progress. Load changes use a 5% nominal
+                    suggestion that you can match to the machine during the
+                    workout.
                   </small>
                 </div>
                 <div className="editor-actions">
@@ -1625,6 +1633,10 @@ function ActiveWorkoutView({
   const recommendation = current
     ? progressionRecommendation(current, previousExercise)
     : null;
+  const firstUnfinishedSet = current?.sets.find((set) => !set.completed);
+  const todayWorkingWeight = firstUnfinishedSet
+    ? firstUnfinishedSet.prescribedWeight
+    : (current?.sets[0]?.prescribedWeight ?? null);
   const restRemaining = workout.restDeadline
     ? Math.max(0, Math.ceil((workout.restDeadline - now) / 1000))
     : 0;
@@ -1685,7 +1697,8 @@ function ActiveWorkoutView({
                 </p>
                 {current.sets[0] && (
                   <p className="prescription-summary">
-                    {current.sets.length} × {current.sets[0].prescribedRepMin}–
+                    {formatRepTargets(current.sets)} target reps · range{" "}
+                    {current.sets[0].prescribedRepMin}–
                     {current.sets[0].prescribedRepMax} @ RIR{" "}
                     {formatRirLabel(current.sets[0].prescribedRir)}
                     {" · "}{formatWeight(current.sets[0].prescribedWeight)}
@@ -1706,15 +1719,52 @@ function ActiveWorkoutView({
                   <strong>RIR {formatRirLabel(current.sets[0].prescribedRir)}</strong>
                 </div>
                 <div className="set-goal-copy">
-                  <span className="eyebrow">Your goal for each work set</span>
+                  <span className="eyebrow">Today&apos;s prescription</span>
                   <h2>
-                    Do {current.sets[0].prescribedRepMin}–
-                    {current.sets[0].prescribedRepMax} clean reps.
+                    Aim for {formatRepTargets(current.sets)} clean reps.
                   </h2>
+                  {current.prescription && (
+                    <div className="prescription-reason">
+                      <strong>{current.prescription.title}</strong>
+                      <p>
+                        {current.prescription.detail}
+                        {current.prescription.sourceDate
+                          ? ` Based on ${dateLabel(current.prescription.sourceDate)}.`
+                          : ""}
+                      </p>
+                    </div>
+                  )}
                   <p>
                     {formatRirSetInstruction(current.sets[0].prescribedRir)}{" "}
                     Then log the reps completed and the RIR you actually had.
                   </p>
+                  <div className="working-weight-control">
+                    <label>
+                      <span>Today&apos;s working weight</span>
+                      <div>
+                        <NumericInput
+                          min="0"
+                          step="0.1"
+                          inputMode="decimal"
+                          placeholder="Bodyweight"
+                          value={todayWorkingWeight}
+                          onValueChange={(value) => {
+                            const weight =
+                              value === "" ? null : Math.max(0, Number(value));
+                            onUpdateExercise((exercise) =>
+                              updateUnfinishedSetWeights(exercise, weight),
+                            );
+                          }}
+                        />
+                        <strong>kg</strong>
+                      </div>
+                    </label>
+                    <small>
+                      {current.prescription?.nominalWeight
+                        ? `Nominal suggestion: ${formatWeight(current.prescription.nominalWeight)}. Enter the closest weight this machine offers.`
+                        : "Leave blank for bodyweight, or enter the available machine setting."}
+                    </small>
+                  </div>
                   <details>
                     <summary>How the rep range and RIR work together</summary>
                     <ul>
@@ -1903,6 +1953,7 @@ function ActiveWorkoutView({
                           exercise.sets[0]?.prescribedRepMax,
                           exercise.sets[0]?.prescribedRir,
                           exercise.sets[0]?.prescribedWeight,
+                          exercise.sets[0]?.prescribedReps,
                         ),
                       ],
                       completed: false,
@@ -1935,7 +1986,7 @@ function ActiveWorkoutView({
 
             <section className={`progression-card ${recommendation?.kind ?? ""}`}>
               <div>
-                <span className="eyebrow">Double progression</span>
+                <span className="eyebrow">Next workout</span>
                 <h2>{recommendation?.title}</h2>
                 <p>{recommendation?.detail}</p>
               </div>

@@ -7,7 +7,8 @@ iPhone Home Screen.
 
 - Custom and template-guided workouts
 - Rep ranges, per-set RIR, kilogram weights, and rest timers
-- RIR-aware double progression with transparent next-weight recommendations
+- History-aware exact rep targets with transparent RIR-based progression
+- Flexible ±5% load suggestions that can be matched to irregular machine steps
 - Previous-two-session hints and estimated-strength progress charts
 - Individually deletable templates and recorded workouts
 - Private on-device IndexedDB storage

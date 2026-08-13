@@ -1361,6 +1361,65 @@ p {
   line-height: 1.48;
 }
 
+.prescription-reason {
+  display: grid;
+  gap: 3px;
+  margin: 9px 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
+}
+
+.prescription-reason strong {
+  color: var(--blue);
+  font-size: 0.76rem;
+}
+
+.working-weight-control {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--blue) 22%, var(--line));
+}
+
+.working-weight-control label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.working-weight-control label > span {
+  color: var(--text);
+  font-size: 0.7rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.working-weight-control label > div {
+  display: grid;
+  grid-template-columns: minmax(76px, 110px) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.working-weight-control input {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-weight: 750;
+  text-align: center;
+}
+
+.working-weight-control small {
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1.4;
+}
+
 .set-goal-copy details {
   margin-top: 10px;
   color: var(--muted);
